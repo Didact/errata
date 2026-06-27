@@ -81,6 +81,23 @@ export function librarianRoutes(dataDir: string) {
       return { ok: true, fragmentId }
     }, { detail: { summary: 'Trigger librarian analysis on a specific fragment' } })
 
+    .post('/stories/:storyId/librarian/resummarize', async ({ params, set }) => {
+      const story = await getStory(dataDir, params.storyId)
+      if (!story) {
+        set.status = 404
+        return { error: 'Story not found' }
+      }
+      try {
+        const { rebuildSummaries } = await import('../librarian/agent')
+        const result = await rebuildSummaries(dataDir, params.storyId)
+        return { ok: true, ...result }
+      } catch (err) {
+        logger.error('Resummarize failed', { error: err instanceof Error ? err.message : String(err) })
+        set.status = 500
+        return { error: err instanceof Error ? err.message : 'Failed to rebuild summaries' }
+      }
+    }, { detail: { summary: 'Rebuild all chapter summaries from scratch' } })
+
     .get('/stories/:storyId/librarian/analysis-stream', async ({ params, set }) => {
       const stream = createSSEStream(params.storyId)
       if (!stream) {

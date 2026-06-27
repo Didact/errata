@@ -2,10 +2,12 @@ import { getModel, buildProviderOptions } from '../llm/client'
 import { ToolLoopAgent, stepCountIs, type ProviderOptions } from 'ai'
 import {
   getStory,
+  updateStory,
   listFragments,
   getFragment,
   updateFragment,
   createFragment,
+  deleteFragment,
   archiveFragment,
   migrateStoryToSummaryFragments,
 } from '../fragments/storage'
@@ -431,6 +433,7 @@ function makeSummaryFragment(params: {
   coverageStart: string | null
   coverageEnd: string | null
   analysisIds: string[]
+  coveredProseIds: string[]
 }): Fragment {
   const now = new Date().toISOString()
   const nameBase = params.chapterName || 'Pre-chapter'
@@ -455,11 +458,47 @@ function makeSummaryFragment(params: {
       coverageStart: params.coverageStart,
       coverageEnd: params.coverageEnd,
       analysisIds: params.analysisIds,
+      // The prose fragments folded into this summary. This — not the
+      // orphan-able summarizedUpTo watermark — is the source of truth for
+      // "what's already summarized", so a regenerate/refine (which gives the
+      // prose a new ID) folds the new variation in exactly once without
+      // re-applying everything else. See collectSummarizedProseIds.
+      coveredProseIds: params.coveredProseIds,
     },
     archived: false,
     version: 1,
     versions: [],
   }
+}
+
+/**
+ * The set of prose fragment IDs already folded into any summary fragment
+ * (archived included — an ID summarized into an era-split fragment must never
+ * be re-applied). Keyed by prose ID rather than analysis ID so it survives
+ * analysis deletion (deleteAnalysis) and the index-entry clearing that an
+ * in-place prose edit triggers. Legacy summary fragments written before
+ * coveredProseIds existed are backfilled from their analysisIds.
+ */
+async function collectSummarizedProseIds(
+  dataDir: string,
+  storyId: string,
+): Promise<Set<string>> {
+  const summaries = await listFragments(dataDir, storyId, 'summary', { includeArchived: true })
+  const result = new Set<string>()
+  for (const summary of summaries) {
+    const meta = summary.meta ?? {}
+    if ('coveredProseIds' in meta && Array.isArray(meta.coveredProseIds)) {
+      for (const pid of meta.coveredProseIds as string[]) result.add(pid)
+      continue
+    }
+    // Legacy backfill: derive prose IDs from the analyses this summary folded in.
+    const analysisIds = Array.isArray(meta.analysisIds) ? (meta.analysisIds as string[]) : []
+    for (const analysisId of analysisIds) {
+      const analysis = await getAnalysis(dataDir, storyId, analysisId)
+      if (analysis?.fragmentId) result.add(analysis.fragmentId)
+    }
+  }
+  return result
 }
 
 /**
@@ -475,6 +514,7 @@ async function appendAndMaybeSplit(
   fragment: Fragment,
   appendText: string,
   newAnalysisIds: string[],
+  newCoveredProseIds: string[],
   newCoverageEnd: string,
   chapterName: string,
 ): Promise<Fragment> {
@@ -486,6 +526,10 @@ async function appendAndMaybeSplit(
     ? (fragment.meta.analysisIds as string[])
     : []
   const analysisIds = [...existingIds, ...newAnalysisIds]
+  const existingCovered = Array.isArray(fragment.meta?.coveredProseIds)
+    ? (fragment.meta.coveredProseIds as string[])
+    : []
+  const coveredProseIds = [...existingCovered, ...newCoveredProseIds]
   const coverageStart = (fragment.meta?.coverageStart as string | null | undefined) ?? null
   const chapterId = (fragment.meta?.chapterId as string | null | undefined) ?? null
 
@@ -496,6 +540,7 @@ async function appendAndMaybeSplit(
       meta: {
         ...fragment.meta,
         analysisIds,
+        coveredProseIds,
         coverageEnd: newCoverageEnd,
         coverageStart: coverageStart ?? (analysisIds.length > 0 ? newCoverageEnd : null),
       },
@@ -526,6 +571,10 @@ async function appendAndMaybeSplit(
     coverageStart,
     coverageEnd: null,
     analysisIds,
+    // The era summary carries the full coverage of everything folded so far,
+    // so collectSummarizedProseIds still sees these IDs as summarized even
+    // though the content was compacted and the originating fragment archived.
+    coveredProseIds,
   })
   await createFragment(dataDir, storyId, eraSummary)
 
@@ -539,6 +588,7 @@ async function appendAndMaybeSplit(
     coverageStart: newCoverageEnd,
     coverageEnd: newCoverageEnd,
     analysisIds: [],
+    coveredProseIds: [],
   })
   await createFragment(dataDir, storyId, fresh)
   return fresh
@@ -585,22 +635,15 @@ async function applyDeferredSummaries(
     return
   }
 
-  // Find where we left off
-  const summarizedUpToIndex = state.summarizedUpTo
-    ? proseIds.indexOf(state.summarizedUpTo)
-    : -1
-  const startIndex = summarizedUpToIndex + 1
-
-  if (startIndex >= cutoffIndex) {
-    requestLogger.debug('No new fragments to summarize', {
-      summarizedUpTo: state.summarizedUpTo,
-      cutoffIndex,
-    })
-    return
-  }
-
-  // Load latest analysis IDs by fragment from index
+  // Load latest analysis IDs by fragment from index, and the set of prose
+  // already folded into a summary. We resume by skipping already-summarized
+  // prose rather than from a single `summarizedUpTo` pointer: that pointer is
+  // a fragment ID, and a regenerate/refine replaces the active fragment's ID,
+  // orphaning the pointer (indexOf → -1 → restart from 0 → every summary
+  // re-appended). Keying on the covered-prose set folds each new variation in
+  // exactly once with no duplication.
   const analysisByFragment = await getLatestAnalysisIdsByFragment(dataDir, storyId)
+  const summarizedProseIds = await collectSummarizedProseIds(dataDir, storyId)
 
   // Collect items in prose-chain order, stopping at first gap.
   type PendingItem = {
@@ -612,7 +655,7 @@ async function applyDeferredSummaries(
   const items: PendingItem[] = []
   let lastAppliedId: string | null = state.summarizedUpTo
 
-  for (let i = startIndex; i < cutoffIndex; i++) {
+  for (let i = 0; i < cutoffIndex; i++) {
     const proseId = proseIds[i]
 
     // Markers sit in the prose chain as structural dividers, not prose.
@@ -620,6 +663,15 @@ async function applyDeferredSummaries(
     // otherwise a marker placed anywhere would block all summaries past it.
     const entryFragment = await getFragment(dataDir, storyId, proseId)
     if (entryFragment?.type === 'marker') {
+      lastAppliedId = proseId
+      continue
+    }
+
+    // Already summarized (possibly in an earlier run, or as a now-inactive
+    // sibling). Skip without treating it as a gap. Checked before the analysis
+    // lookup so a since-deleted analysis on already-summarized prose can't
+    // wrongly halt the scan.
+    if (summarizedProseIds.has(proseId)) {
       lastAppliedId = proseId
       continue
     }
@@ -670,6 +722,7 @@ async function applyDeferredSummaries(
 
     const appendText = chapterItems.map(i => i.text).join('\n\n')
     const newAnalysisIds = chapterItems.map(i => i.analysisId)
+    const newCoveredProseIds = chapterItems.map(i => i.proseId)
     const coverageEnd = chapterItems[chapterItems.length - 1].proseId
 
     let active: Fragment
@@ -680,6 +733,7 @@ async function applyDeferredSummaries(
         existing,
         appendText,
         newAnalysisIds,
+        newCoveredProseIds,
         coverageEnd,
         chapterName,
       )
@@ -692,6 +746,7 @@ async function applyDeferredSummaries(
         coverageStart: chapterItems[0].proseId,
         coverageEnd,
         analysisIds: newAnalysisIds,
+        coveredProseIds: newCoveredProseIds,
       })
       await createFragment(dataDir, storyId, fresh)
       active = fresh
@@ -725,4 +780,50 @@ async function applyDeferredSummaries(
     totalSummaryLength: items.reduce((n, x) => n + x.text.length, 0),
     chapters: byChapter.size,
   })
+}
+
+/**
+ * Rebuild all chapter summaries from scratch. Deletes existing summary
+ * fragments and re-folds each active prose fragment's latest analysis once,
+ * in order — so stories whose summaries were doubled or left stale by the old
+ * orphan-able-watermark bug self-heal. No model call: summaries are a
+ * deterministic concatenation of each analysis's stored summaryUpdate.
+ *
+ * Serialized against concurrent analysis runs on the same lock/branch as
+ * runLibrarian, since both mutate summary fragments and librarian state.
+ */
+export async function rebuildSummaries(
+  dataDir: string,
+  storyId: string,
+): Promise<{ summaryFragments: number }> {
+  return withKeyLock(`librarian:${storyId}`, () =>
+    withBranch(dataDir, storyId, async () => {
+      const requestLogger = logger.child({ storyId })
+      const story = await getStory(dataDir, storyId)
+      if (!story) throw new Error(`Story ${storyId} not found`)
+
+      // Drop every existing summary fragment (regenerable from analyses) and
+      // the legacy story.summary, so nothing reintroduces stale content. The
+      // covered-prose set is then empty and the re-application below folds in
+      // each active prose exactly once.
+      const existing = await listFragments(dataDir, storyId, 'summary', { includeArchived: true })
+      for (const summary of existing) {
+        await deleteFragment(dataDir, storyId, summary.id)
+      }
+      if (typeof story.summary === 'string' && story.summary.trim()) {
+        await updateStory(dataDir, { ...story, summary: '', updatedAt: new Date().toISOString() })
+      }
+
+      const state = await getState(dataDir, storyId)
+      await saveState(dataDir, storyId, { ...state, summarizedUpTo: null })
+
+      const freshStory = await getStory(dataDir, storyId)
+      if (!freshStory) throw new Error(`Story ${storyId} not found`)
+      await applyDeferredSummaries(dataDir, storyId, freshStory, { summarizedUpTo: null }, requestLogger)
+
+      const after = await listFragments(dataDir, storyId, 'summary')
+      requestLogger.info('Summaries rebuilt', { deleted: existing.length, created: after.length })
+      return { summaryFragments: after.length }
+    }),
+  )
 }

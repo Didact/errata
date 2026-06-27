@@ -998,12 +998,29 @@ function TraceItem({ item }: { item: CollapsedTraceItem }) {
 function SummariesTab({ storyId }: { storyId: string }) {
   const [showArchived, setShowArchived] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
   const { data: summaries } = useQuery({
     queryKey: ['fragments', storyId, 'summary'],
     queryFn: () => api.fragments.list(storyId, 'summary'),
     refetchInterval: 5000,
   })
+
+  const resummarizeMutation = useMutation({
+    mutationFn: () => api.librarian.resummarize(storyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fragments', storyId, 'summary'] })
+      queryClient.invalidateQueries({ queryKey: ['fragments-archived', storyId, 'summary'] })
+    },
+  })
+
+  const handleRebuild = () => {
+    if (resummarizeMutation.isPending) return
+    const ok = window.confirm(
+      'Rebuild summaries from scratch? This regenerates every chapter summary from the current prose and discards any manual edits to summaries.',
+    )
+    if (ok) resummarizeMutation.mutate()
+  }
 
   const { data: archivedSummaries } = useQuery({
     queryKey: ['fragments-archived', storyId, 'summary'],
@@ -1075,6 +1092,22 @@ function SummariesTab({ storyId }: { storyId: string }) {
                     />
                   ))}
                 </div>
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-border/40">
+              <button
+                onClick={handleRebuild}
+                disabled={resummarizeMutation.isPending}
+                className="flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground/70 hover:text-foreground transition-colors px-1 disabled:opacity-50"
+              >
+                <Wrench className="size-2.5" />
+                {resummarizeMutation.isPending ? 'rebuilding…' : 'rebuild summaries'}
+              </button>
+              {resummarizeMutation.isError && (
+                <p className="text-[0.625rem] text-destructive px-1 pt-1">
+                  Rebuild failed. Try again.
+                </p>
               )}
             </div>
           </>

@@ -8,7 +8,7 @@ import {
   migrateStoryToSummaryFragments,
 } from '@/server/fragments/storage'
 import { getAnalysis, listAnalyses } from '@/server/librarian/storage'
-import { initProseChain, addProseSection } from '@/server/fragments/prose-chain'
+import { initProseChain, addProseSection, addProseVariation, findSectionIndex } from '@/server/fragments/prose-chain'
 import type { StoryMeta, Fragment } from '@/server/fragments/schema'
 
 const { mockAgentStream } = vi.hoisted(() => ({
@@ -31,7 +31,7 @@ vi.mock('ai', async () => {
   }
 })
 
-import { runLibrarian } from '@/server/librarian/agent'
+import { runLibrarian, rebuildSummaries } from '@/server/librarian/agent'
 import { ensureCoreAgentsRegistered } from '@/server/agents'
 
 function makeStory(
@@ -344,5 +344,56 @@ describe('summary fragments', () => {
     const full = await getAnalysis(dataDir, storyId, analyses[0].id)
     expect(full?.summaryUpdate).toBe('Librarian intent.')
     expect(full?.summaryFragmentId).toBeDefined()
+  })
+
+  // ── Regenerate / redo idempotency ────────────────────────────
+
+  async function setupRegenScenario() {
+    await createStory(dataDir, makeStory())
+    await createFragment(dataDir, storyId, makeFragment({ id: 'pr-a' }))
+    await createFragment(dataDir, storyId, makeFragment({ id: 'pr-b' }))
+    await setupChain(dataDir, storyId, ['pr-a', 'pr-b'])
+
+    mockSummary('Alpha happened.')
+    await runLibrarian(dataDir, storyId, 'pr-a')
+    mockSummary('Beta original.')
+    await runLibrarian(dataDir, storyId, 'pr-b')
+
+    // Regenerate pr-b: a new variation becomes active in pr-b's section, and
+    // pr-b — which was the summarizedUpTo watermark — goes inactive.
+    await createFragment(dataDir, storyId, makeFragment({ id: 'pr-b2' }))
+    const sectionIndex = await findSectionIndex(dataDir, storyId, 'pr-b')
+    await addProseVariation(dataDir, storyId, sectionIndex, 'pr-b2')
+
+    mockSummary('Beta rewritten.')
+    await runLibrarian(dataDir, storyId, 'pr-b2')
+  }
+
+  it('regenerating a summarized fragment folds the new variation in once, without re-appending earlier summaries', async () => {
+    await setupRegenScenario()
+
+    const [summary] = await listFragments(dataDir, storyId, 'summary')
+    // The orphaned watermark used to restart from 0 and re-append everything.
+    expect(summary.content.split('Alpha happened.').length - 1).toBe(1)
+    expect(summary.content.split('Beta original.').length - 1).toBe(1)
+    // The regenerated variation's summary is folded in.
+    expect(summary.content).toContain('Beta rewritten.')
+  })
+
+  it('rebuildSummaries rebuilds clean summaries from active prose, scrubbing superseded content', async () => {
+    await setupRegenScenario()
+    // Incremental application leaves the stale 'Beta original.' behind…
+    const [before] = await listFragments(dataDir, storyId, 'summary')
+    expect(before.content).toContain('Beta original.')
+
+    const result = await rebuildSummaries(dataDir, storyId)
+    expect(result.summaryFragments).toBeGreaterThan(0)
+
+    const [after] = await listFragments(dataDir, storyId, 'summary')
+    expect(after.content).toContain('Alpha happened.')
+    expect(after.content).toContain('Beta rewritten.')
+    // …a rebuild drops it, since pr-b is no longer the active variation.
+    expect(after.content).not.toContain('Beta original.')
+    expect(after.content.split('Alpha happened.').length - 1).toBe(1)
   })
 })
