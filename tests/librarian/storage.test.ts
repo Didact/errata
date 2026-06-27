@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTempDir, makeTestSettings } from '../setup'
 import { createStory } from '@/server/fragments/storage'
@@ -308,6 +308,54 @@ describe('librarian storage', () => {
       expect(loaded.recentMentions).toEqual({})
       expect(loaded.timeline).toEqual([])
       expect(loaded.lastAnalyzedFragmentId).toBe('pr-0001')
+    })
+
+    it('does not let one corrupt analysis file break the derived state for other fragments', async () => {
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-good',
+        fragmentId: 'pr-good',
+        mentionedCharacters: ['ch-0001'],
+        timelineEvents: [{ event: 'Hero entered cave', position: 'during' }],
+      }))
+
+      // Write a corrupt analysis file directly (invalid JSON) and a matching
+      // index entry, simulating a partially-written or damaged file on disk.
+      const analysesDir = join(dataDir, 'stories', storyId, 'branches', 'main', 'librarian', 'analyses')
+      await mkdir(analysesDir, { recursive: true })
+      await writeFile(join(analysesDir, 'analysis-corrupt.json'), '{not valid json', 'utf-8')
+      const indexPath = join(dataDir, 'stories', storyId, 'branches', 'main', 'librarian', 'index.json')
+      const index = JSON.parse(await readFile(indexPath, 'utf-8'))
+      index.latestByFragmentId['pr-corrupt'] = { analysisId: 'analysis-corrupt', createdAt: new Date().toISOString() }
+      await writeJsonAtomic(indexPath, index)
+
+      const state = await getState(dataDir, storyId)
+      expect(state.recentMentions).toEqual({ 'ch-0001': ['pr-good'] })
+      expect(state.timeline).toEqual([{ event: 'Hero entered cave', fragmentId: 'pr-good' }])
+    })
+
+    it('treats legacy analyses missing mentionedCharacters/timelineEvents as empty rather than throwing', async () => {
+      // Simulate an analysis file written before these fields existed.
+      const analysesDir = join(dataDir, 'stories', storyId, 'branches', 'main', 'librarian', 'analyses')
+      await mkdir(analysesDir, { recursive: true })
+      const legacy = {
+        id: 'analysis-legacy',
+        createdAt: new Date().toISOString(),
+        fragmentId: 'pr-legacy',
+        summaryUpdate: 'Something happened.',
+        contradictions: [],
+        fragmentSuggestions: [],
+        // mentionedCharacters/timelineEvents intentionally omitted
+      }
+      await writeJsonAtomic(join(analysesDir, 'analysis-legacy.json'), legacy)
+      await rebuildAnalysisIndex(dataDir, storyId)
+
+      const state = await getState(dataDir, storyId)
+      expect(state.recentMentions).toEqual({})
+      expect(state.timeline).toEqual([])
+
+      const loaded = await getAnalysis(dataDir, storyId, 'analysis-legacy')
+      expect(loaded?.mentionedCharacters).toEqual([])
+      expect(loaded?.timelineEvents).toEqual([])
     })
   })
 })

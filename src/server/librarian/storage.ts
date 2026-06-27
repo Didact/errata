@@ -292,7 +292,9 @@ export async function getAnalysis(
   return normalizeAnalysis(JSON.parse(raw))
 }
 
-/** Migrate old knowledgeSuggestions → fragmentSuggestions on read */
+/** Migrate old knowledgeSuggestions → fragmentSuggestions on read, and backfill
+ * array fields absent from analyses written before they existed, so readers
+ * (listAnalyses, deriveMentionsAndTimeline) don't need defensive ?? [] everywhere. */
 function normalizeAnalysis(data: Record<string, unknown>): LibrarianAnalysis {
   const analysis = data as unknown as LibrarianAnalysis
   if (!analysis.fragmentSuggestions && analysis.knowledgeSuggestions) {
@@ -300,6 +302,15 @@ function normalizeAnalysis(data: Record<string, unknown>): LibrarianAnalysis {
   }
   if (!analysis.fragmentSuggestions) {
     analysis.fragmentSuggestions = []
+  }
+  if (!analysis.contradictions) {
+    analysis.contradictions = []
+  }
+  if (!analysis.mentionedCharacters) {
+    analysis.mentionedCharacters = []
+  }
+  if (!analysis.timelineEvents) {
+    analysis.timelineEvents = []
   }
   return analysis
 }
@@ -384,8 +395,13 @@ async function deriveMentionsAndTimeline(
   const entries: Array<{ fragmentId: string; analysis: LibrarianAnalysis }> = []
   for (const [fragmentId, analysisId] of latestByFragment) {
     if (onlyFragmentIds && !onlyFragmentIds.has(fragmentId)) continue
-    const analysis = await getAnalysis(dataDir, storyId, analysisId)
-    if (analysis) entries.push({ fragmentId, analysis })
+    try {
+      const analysis = await getAnalysis(dataDir, storyId, analysisId)
+      if (analysis) entries.push({ fragmentId, analysis })
+    } catch {
+      // A corrupt/unreadable analysis file shouldn't break this read for
+      // every other fragment — skip it rather than throwing.
+    }
   }
   entries.sort((a, b) => a.analysis.createdAt.localeCompare(b.analysis.createdAt))
 
@@ -402,21 +418,29 @@ async function deriveMentionsAndTimeline(
   return { recentMentions, timeline }
 }
 
-export async function getState(
+async function readPersistedScalars(
   dataDir: string,
   storyId: string,
-): Promise<LibrarianState> {
+): Promise<Pick<LibrarianState, 'lastAnalyzedFragmentId' | 'summarizedUpTo'>> {
   const path = await statePath(dataDir, storyId)
   const persisted = existsSync(path)
     ? JSON.parse(await readFile(path, 'utf-8')) as Partial<LibrarianState>
     : {}
-  const { recentMentions, timeline } = await deriveMentionsAndTimeline(dataDir, storyId)
   return {
     lastAnalyzedFragmentId: persisted.lastAnalyzedFragmentId ?? null,
     summarizedUpTo: persisted.summarizedUpTo ?? null,
-    recentMentions,
-    timeline,
   }
+}
+
+export async function getState(
+  dataDir: string,
+  storyId: string,
+): Promise<LibrarianState> {
+  const [scalars, derived] = await Promise.all([
+    readPersistedScalars(dataDir, storyId),
+    deriveMentionsAndTimeline(dataDir, storyId),
+  ])
+  return { ...scalars, ...derived }
 }
 
 /**
@@ -430,12 +454,12 @@ export async function getActiveState(
   dataDir: string,
   storyId: string,
 ): Promise<LibrarianState> {
-  const [base, activeIds] = await Promise.all([
-    getState(dataDir, storyId),
+  const [scalars, activeIds] = await Promise.all([
+    readPersistedScalars(dataDir, storyId),
     getActiveProseIds(dataDir, storyId),
   ])
-  const { recentMentions, timeline } = await deriveMentionsAndTimeline(dataDir, storyId, new Set(activeIds))
-  return { ...base, recentMentions, timeline }
+  const derived = await deriveMentionsAndTimeline(dataDir, storyId, new Set(activeIds))
+  return { ...scalars, ...derived }
 }
 
 export async function saveState(
