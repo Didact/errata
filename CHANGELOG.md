@@ -3,6 +3,18 @@
 All notable changes to Errata are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## [1.10.1] — 2026-06-26
+
+### Fixed
+- **Librarian no longer accumulates stale memory/story-graph data.** Editing
+  prose in place used to leave the prior analysis's mentions and timeline
+  events sitting alongside the fresh ones; regenerating or refining a passage
+  left the superseded variation's facts counted as current indefinitely.
+  `recentMentions`/`timeline` are now derived from the analysis index on read
+  instead of an incrementally-mutated accumulator, and the librarian status
+  view scopes to the prose chain's active variations — existing stories with
+  stale data self-heal with no migration needed.
+
 ## [1.10.0] — 2026-06-26
 
 ### Added
