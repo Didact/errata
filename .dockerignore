@@ -1,0 +1,12 @@
+.git
+node_modules
+.output
+dist
+data
+data_
+_data
+.env
+*.local
+.DS_Store
+.claude
+.agent
