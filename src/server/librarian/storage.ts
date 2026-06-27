@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { getContentRoot } from '../fragments/branches'
+import { getActiveProseIds } from '../fragments/prose-chain'
 import { generateConversationId } from '@/lib/fragment-ids'
 import { writeJsonAtomic } from '../fs-utils'
 import { withKeyLock } from '../async-lock'
@@ -365,21 +366,76 @@ export async function listAnalyses(
   return summaries
 }
 
+/**
+ * Derive recentMentions/timeline from the analysis index rather than trusting
+ * an incrementally-mutated copy. The index already holds exactly one (latest)
+ * analysis per fragment ID, so re-analyzing a fragment (e.g. after an in-place
+ * edit) can never leave stale entries behind, and stories with stale data from
+ * before this existed self-heal automatically — there's nothing to migrate.
+ * Pass `onlyFragmentIds` to additionally scope the result to a set of "current"
+ * fragment IDs (e.g. the active variations in the prose chain).
+ */
+async function deriveMentionsAndTimeline(
+  dataDir: string,
+  storyId: string,
+  onlyFragmentIds?: Set<string>,
+): Promise<Pick<LibrarianState, 'recentMentions' | 'timeline'>> {
+  const latestByFragment = await getLatestAnalysisIdsByFragment(dataDir, storyId)
+  const entries: Array<{ fragmentId: string; analysis: LibrarianAnalysis }> = []
+  for (const [fragmentId, analysisId] of latestByFragment) {
+    if (onlyFragmentIds && !onlyFragmentIds.has(fragmentId)) continue
+    const analysis = await getAnalysis(dataDir, storyId, analysisId)
+    if (analysis) entries.push({ fragmentId, analysis })
+  }
+  entries.sort((a, b) => a.analysis.createdAt.localeCompare(b.analysis.createdAt))
+
+  const recentMentions: Record<string, string[]> = {}
+  const timeline: LibrarianState['timeline'] = []
+  for (const { fragmentId, analysis } of entries) {
+    for (const charId of analysis.mentionedCharacters) {
+      (recentMentions[charId] ??= []).push(fragmentId)
+    }
+    for (const event of analysis.timelineEvents) {
+      timeline.push({ event: event.event, fragmentId })
+    }
+  }
+  return { recentMentions, timeline }
+}
+
 export async function getState(
   dataDir: string,
   storyId: string,
 ): Promise<LibrarianState> {
   const path = await statePath(dataDir, storyId)
-  if (!existsSync(path)) {
-    return {
-      lastAnalyzedFragmentId: null,
-      summarizedUpTo: null,
-      recentMentions: {},
-      timeline: [],
-    }
+  const persisted = existsSync(path)
+    ? JSON.parse(await readFile(path, 'utf-8')) as Partial<LibrarianState>
+    : {}
+  const { recentMentions, timeline } = await deriveMentionsAndTimeline(dataDir, storyId)
+  return {
+    lastAnalyzedFragmentId: persisted.lastAnalyzedFragmentId ?? null,
+    summarizedUpTo: persisted.summarizedUpTo ?? null,
+    recentMentions,
+    timeline,
   }
-  const raw = await readFile(path, 'utf-8')
-  return JSON.parse(raw) as LibrarianState
+}
+
+/**
+ * Like getState, but recentMentions/timeline are scoped to fragments that are
+ * currently the active variation in the prose chain. Superseded
+ * regenerate/refine variations keep their analysis untouched (so switching
+ * back to them via switchActiveProse instantly restores their contributions
+ * here) — this view just excludes inactive ones from "current" reads.
+ */
+export async function getActiveState(
+  dataDir: string,
+  storyId: string,
+): Promise<LibrarianState> {
+  const [base, activeIds] = await Promise.all([
+    getState(dataDir, storyId),
+    getActiveProseIds(dataDir, storyId),
+  ])
+  const { recentMentions, timeline } = await deriveMentionsAndTimeline(dataDir, storyId, new Set(activeIds))
+  return { ...base, recentMentions, timeline }
 }
 
 export async function saveState(
@@ -389,7 +445,10 @@ export async function saveState(
 ): Promise<void> {
   const dir = await librarianDir(dataDir, storyId)
   await mkdir(dir, { recursive: true })
-  await writeJsonAtomic(await statePath(dataDir, storyId), state)
+  await writeJsonAtomic(await statePath(dataDir, storyId), {
+    lastAnalyzedFragmentId: state.lastAnalyzedFragmentId,
+    summarizedUpTo: state.summarizedUpTo,
+  })
 }
 
 // --- Chat history ---

@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createTempDir, makeTestSettings } from '../setup'
 import { createApp } from '@/server/api'
 import { createStory, createFragment, getFragment, getStory, updateStory } from '@/server/fragments/storage'
+import { addProseSection } from '@/server/fragments/prose-chain'
 import {
   saveAnalysis,
   saveState,
   type LibrarianAnalysis,
-  type LibrarianState,
 } from '@/server/librarian/storage'
 
 // Mock the AI SDK to prevent real LLM calls
@@ -98,13 +98,21 @@ describe('librarian API routes', () => {
     })
 
     it('returns saved state', async () => {
-      const state: LibrarianState = {
+      // recentMentions/timeline are derived from analyses of currently-active
+      // prose, not round-tripped from saveState — seed both.
+      await addProseSection(dataDir, storyId, 'pr-0001')
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-pr-0001',
+        fragmentId: 'pr-0001',
+        mentionedCharacters: ['ch-0001'],
+        timelineEvents: [{ event: 'Battle', position: 'during' }],
+      }))
+      await saveState(dataDir, storyId, {
         lastAnalyzedFragmentId: 'pr-0001',
         summarizedUpTo: null,
-        recentMentions: { 'ch-0001': ['pr-0001'] },
-        timeline: [{ event: 'Battle', fragmentId: 'pr-0001' }],
-      }
-      await saveState(dataDir, storyId, state)
+        recentMentions: {},
+        timeline: [],
+      })
 
       const res = await app.fetch(
         new Request(`http://localhost/api/stories/${storyId}/librarian/status`),
