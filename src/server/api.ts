@@ -2,7 +2,6 @@ import { Elysia } from 'elysia'
 import { openapi } from '@elysiajs/openapi'
 import { pluginRegistry } from './plugins/registry'
 import { getRuntimePluginUi } from './plugins/runtime-ui'
-import { instructionRegistry } from './instructions'
 import { dirname, extname, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
 
@@ -18,6 +17,9 @@ import { configRoutes } from './routes/config'
 import { agentBlockRoutes } from './routes/agent-blocks'
 import { tokenUsageRoutes } from './routes/token-usage'
 import { folderRoutes } from './routes/folders'
+import { sharingRoutes } from './routes/sharing'
+import { erratanetRoutes } from './routes/erratanet'
+import { erratanetAgentConfigRoutes } from './routes/erratanet-agent-config'
 
 const DATA_DIR = process.env.DATA_DIR ?? './data'
 
@@ -131,9 +133,9 @@ export function createApp(dataDir: string = DATA_DIR) {
     .use(agentBlockRoutes(dataDir))
     .use(tokenUsageRoutes(dataDir))
     .use(folderRoutes(dataDir))
-
-  // Load instruction overrides after agents are registered (route imports trigger agent registration)
-  instructionRegistry.loadOverridesSync(dataDir)
+    .use(sharingRoutes(dataDir))
+    .use(erratanetRoutes(dataDir))
+    .use(erratanetAgentConfigRoutes(dataDir))
 
   // Mount plugin routes
   for (const plugin of pluginRegistry.listAll()) {

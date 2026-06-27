@@ -8,7 +8,27 @@ import { compileBlocks, expandMessagesFragmentTags } from '../llm/context-builde
 import { getModel } from '../llm/client'
 import { applyBlockConfig } from '../blocks/apply'
 import { createScriptHelpers } from '../blocks/script-context'
+import { pluginRegistry } from '../plugins/registry'
+import { collectPluginToolsWithOrigin } from '../plugins/tools'
 import { CustomBlockDefinitionSchema } from '../blocks/schema'
+
+/** Agents that receive plugin-contributed tools at generation time. */
+const PLUGIN_TOOL_AGENTS = new Set(['generation.writer', 'generation.prewriter'])
+
+/** Append the story's enabled plugin tool names so they're toggleable in the UI. */
+function withPluginTools(
+  agentName: string,
+  base: string[],
+  story: { settings: { enabledPlugins?: string[] } },
+  dataDir: string,
+  storyId: string,
+): string[] {
+  if (!PLUGIN_TOOL_AGENTS.has(agentName)) return base
+  const enabledPlugins = pluginRegistry.getEnabled(story.settings.enabledPlugins ?? [])
+  const { tools } = collectPluginToolsWithOrigin(enabledPlugins, dataDir, storyId)
+  const pluginNames = Object.keys(tools).filter((name) => !base.includes(name))
+  return [...base, ...pluginNames]
+}
 import type { BlockOverride } from '../blocks/schema'
 import {
   getAgentBlockConfig,
@@ -110,7 +130,7 @@ export function agentBlockRoutes(dataDir: string) {
       return {
         config,
         builtinBlocks,
-        availableTools: def.availableTools ?? [],
+        availableTools: withPluginTools(params.agentName, def.availableTools ?? [], _story, dataDir, params.storyId),
       }
     }), { detail: { summary: 'Get agent config and builtin blocks' } })
 

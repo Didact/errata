@@ -13,6 +13,7 @@ import { getActiveProseIds, getProseChain } from '../fragments/prose-chain'
 import { generateFragmentId } from '@/lib/fragment-ids'
 import type { Fragment } from '../fragments/schema'
 import { withBranch } from '../fragments/branches'
+import { withKeyLock } from '../async-lock'
 import {
   saveAnalysis,
   getLatestAnalysisIdsByFragment,
@@ -23,6 +24,7 @@ import {
 } from './storage'
 import { applyFragmentSuggestion } from './suggestions'
 import { reportUsage } from '../llm/token-tracker'
+import { normalizeTokenUsage } from '../llm/usage-normalizer'
 import { createLogger } from '../logging'
 import { compileAgentContext } from '../agents/compile-agent-context'
 import { createEmptyCollector, createAnalysisTools } from './analysis-tools'
@@ -58,7 +60,12 @@ export async function runLibrarian(
   storyId: string,
   fragmentId: string,
 ): Promise<LibrarianAnalysis> {
-  return withBranch(dataDir, storyId, () => runLibrarianInner(dataDir, storyId, fragmentId))
+  // Serialize analysis runs per story. Concurrent runs would clobber state.json,
+  // the live SSE buffer, the analysis index, deferred summary fragments, and the
+  // summarizedUpTo watermark — all unguarded read-modify-write.
+  return withKeyLock(`librarian:${storyId}`, () =>
+    withBranch(dataDir, storyId, () => runLibrarianInner(dataDir, storyId, fragmentId)),
+  )
 }
 
 async function runLibrarianInner(
@@ -209,9 +216,11 @@ async function runLibrarianInner(
           })
           break
         }
+        case 'finish-step':
+          stepCount++
+          break
         case 'finish':
           lastFinishReason = (p.finishReason as string) ?? 'unknown'
-          stepCount++
           break
       }
     }
@@ -219,11 +228,9 @@ async function runLibrarianInner(
     // Track token usage for librarian analysis
     try {
       const rawUsage = await result.totalUsage
-      if (rawUsage && typeof rawUsage.inputTokens === 'number') {
-        reportUsage(dataDir, storyId, 'librarian.analyze', {
-          inputTokens: rawUsage.inputTokens,
-          outputTokens: rawUsage.outputTokens ?? 0,
-        }, modelId)
+      const usage = normalizeTokenUsage(rawUsage)
+      if (usage) {
+        reportUsage(dataDir, storyId, 'librarian.analyze', usage, modelId)
       }
     } catch {
       // Some providers may not report usage

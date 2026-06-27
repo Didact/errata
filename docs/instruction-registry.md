@@ -2,9 +2,9 @@
 
 ## Overview
 
-The instruction registry provides centralized management of all LLM prompt instructions with support for model-specific overrides. Instead of hardcoding system prompts in agent modules, each instruction is registered under a dot-separated key and resolved at runtime — optionally selecting a model-specific variant when one is configured.
+The instruction registry provides centralized management of all LLM prompt instructions. Instead of hardcoding system prompts in agent modules, each instruction is registered under a dot-separated key and resolved at runtime.
 
-This allows users to customize any instruction (system prompts, persona templates, tool suffixes) per model family without modifying code, via JSON files on disk.
+> **Removed:** the model-specific override layer (`data/instruction-sets/*.json`, `modelMatch`, `loadOverridesSync`, `InstructionSetSchema`) no longer exists. Per-agent block configuration (the Agent Context panel) supersedes it — customize prompts there instead. Leftover files in `data/instruction-sets/` are ignored, and the server logs a startup warning when it finds any.
 
 ## API
 
@@ -13,11 +13,10 @@ The singleton `instructionRegistry` is exported from `src/server/instructions/in
 | Method | Signature | Description |
 |---|---|---|
 | `registerDefault` | `(key: string, text: string) => void` | Register the default text for an instruction key. Called at module init. |
-| `resolve` | `(key: string, modelId?: string) => string` | Resolve an instruction: checks overrides first (if `modelId` provided), then returns default. Throws if key is unregistered. |
-| `getDefault` | `(key: string) => string \| undefined` | Return the default text without checking overrides. |
+| `resolve` | `(key: string, modelId?: string) => string` | Return the registered default. The `modelId` parameter is accepted for call-site compatibility but ignored. Throws if key is unregistered. |
+| `getDefault` | `(key: string) => string \| undefined` | Return the default text, or undefined for unknown keys. |
 | `listKeys` | `() => string[]` | List all registered instruction keys. |
-| `loadOverridesSync` | `(dataDir: string) => void` | Load all `InstructionSet` JSON files from `data/instruction-sets/`. Called once on startup. |
-| `clear` | `() => void` | Reset all defaults and overrides. Used in tests. |
+| `clear` | `() => void` | Reset all defaults. Used in tests. |
 
 ## Registered Instruction Keys
 
@@ -67,53 +66,9 @@ All 19 keys grouped by module:
 |---|---|---|
 | `chapters.summarize.system` | `src/server/chapters/agents.ts` | Chapter summarization system prompt |
 
-## Model-Specific Overrides
+## Customizing Instructions
 
-Overrides are defined as `InstructionSet` JSON files stored at `data/instruction-sets/*.json`.
-
-### InstructionSet Schema
-
-```ts
-{
-  name: string         // Human-readable name (min 1 char)
-  modelMatch: string   // Exact model ID string or /regex/flags pattern
-  priority: number     // Lower = higher precedence (default: 100)
-  instructions: {      // Map of instruction key → replacement text
-    [key: string]: string
-  }
-}
-```
-
-### Matching Logic
-
-The `modelMatch` field supports two formats:
-
-- **Exact string**: `"deepseek-chat"` — matches only that exact model ID
-- **Regex pattern**: `"/deepseek-.*/i"` — parsed as a regular expression with optional flags
-
-### Priority System
-
-When multiple override files match the same model ID, they are sorted by `priority` ascending — **lower numbers are checked first**. The first match for a given key wins.
-
-Example: Two files both match `deepseek-chat` for key `generation.system`:
-- `high-priority.json` with `priority: 10` — this one wins
-- `low-priority.json` with `priority: 200` — only used for keys not in the first file
-
-### Example Override File
-
-```json
-{
-  "name": "DeepSeek Overrides",
-  "modelMatch": "/deepseek-.*/i",
-  "priority": 50,
-  "instructions": {
-    "generation.system": "You are a creative fiction writer. Write the next passage...",
-    "librarian.analyze.system": "Analyze the prose passage for continuity signals..."
-  }
-}
-```
-
-Keys not present in the `instructions` map fall through to the registered default.
+Per-model JSON overrides were replaced by **agent blocks**: every agent's prompt is assembled from blocks that can be overridden, reordered, disabled, or extended per story in the Agent Context panel. To customize an instruction, override the block that carries it (typically the `instructions` block) for the agent in question. See `docs/context-blocks.md` and `docs/adding-agents.md`.
 
 ## Template Variables
 
@@ -128,22 +83,16 @@ Some instruction keys contain `{{placeholder}}` markers that are substituted at 
 
 ## Integration
 
-Instructions flow into agent contexts through `instructionRegistry.resolve(key, modelId)`:
+Instructions flow into agent contexts through `instructionRegistry.resolve(key)`:
 
 1. Agent block definitions call `resolve()` in their `createDefaultBlocks()` function
-2. The `modelId` comes from `AgentBlockContext.modelId` (set during model resolution)
-3. If the resolved model has a matching override, the override text is used instead of the default
-4. The instruction text becomes the content of a context block (typically the `instructions` block)
-
-### Startup
-
-Overrides are loaded on server startup via `loadOverridesSync(dataDir)` in `src/server/api.ts`. This reads all JSON files from `data/instruction-sets/`, validates them against `InstructionSetSchema`, and sorts by priority. Malformed files are skipped with a warning.
+2. The instruction text becomes the content of a context block (typically the `instructions` block)
+3. Users customize that block per story via the Agent Context panel (block overrides), not via the registry
 
 ## File Reference
 
 | File | Purpose |
 |---|---|
 | `src/server/instructions/registry.ts` | `InstructionRegistry` class and singleton |
-| `src/server/instructions/schema.ts` | `InstructionSetSchema` (Zod v4) and `InstructionSet` type |
 | `src/server/instructions/index.ts` | Re-exports |
 | `tests/instructions/registry.test.ts` | Full test suite |

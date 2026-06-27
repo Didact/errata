@@ -124,6 +124,19 @@ function createMockStreamResult(text: string) {
   }
 }
 
+/** A stream result whose fullStream emits some text then throws (provider error). */
+function createThrowingStreamResult(partialText: string) {
+  async function* generateFullStream() {
+    if (partialText) yield { type: 'text-delta' as const, text: partialText }
+    throw new Error('provider exploded mid-stream')
+  }
+  return {
+    fullStream: generateFullStream(),
+    totalUsage: Promise.resolve({ inputTokens: 10, outputTokens: 5 }),
+    finishReason: Promise.resolve('error' as const),
+  }
+}
+
 describe('generation endpoint', () => {
   let dataDir: string
   let cleanup: () => Promise<void>
@@ -186,6 +199,26 @@ describe('generation endpoint', () => {
     const userText = extractText(msg!.content)
     expect(userText).toContain('Dark gothic style.')
     expect(userText).toContain('Continue the story')
+  })
+
+  it('does NOT save a fragment when the stream fails (non-abort error)', async () => {
+    mockAgentStream.mockResolvedValue(createThrowingStreamResult('partial prose that never finished') as any)
+
+    const before = await listFragments(dataDir, storyId, 'prose')
+
+    const res = await api(`/stories/${storyId}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'Continue', saveResult: true }),
+    })
+
+    // Drain the (errored) body so the server-side stream runs to completion.
+    await res.text().catch(() => {})
+    await new Promise((r) => setTimeout(r, 50))
+
+    const after = await listFragments(dataDir, storyId, 'prose')
+    expect(after.length).toBe(before.length) // no phantom fragment persisted
+    expect(getPendingCount()).toBe(0) // librarian not triggered for a failed run
   })
 
   it('POST /stories/:storyId/generate applies writer instruction replacement from agent config', async () => {

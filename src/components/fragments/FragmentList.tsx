@@ -13,9 +13,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Plus, Pin, GripVertical, FileDown, UserPlus, Archive, FolderPlus, ChevronRight, MoreHorizontal, Pencil, Trash2, FolderOpen } from 'lucide-react'
+import { Plus, Pin, GripVertical, FileDown, UserPlus, Archive, FolderPlus, ChevronRight, MoreHorizontal, Pencil, Trash2, FolderOpen, ListFilter } from 'lucide-react'
 import { Caption } from '@/components/ui/prose-text'
 
 interface FragmentListProps {
@@ -445,6 +447,7 @@ export function FragmentList({
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [newFolderId, setNewFolderId] = useState<string | null>(null)
+  const [typeFilter, setTypeFilter] = useState('all')
 
   const { data: fragments, isLoading } = useQuery({
     queryKey: ['fragments', storyId, type, allowedTypes?.join(',') ?? 'all'],
@@ -610,9 +613,32 @@ export function FragmentList({
   }, [])
 
   const showType = type === undefined || !!allowedTypes?.length
+  const supportsTypeFilter = type === undefined && !allowedTypes?.length
   const canDrag = sort === 'order' && !search.trim()
   const isSearching = !!search.trim()
   const hasFolders = (folders?.length ?? 0) > 0
+
+  const typeOptions = useMemo(() => {
+    if (!supportsTypeFilter || !fragments) return []
+    const counts = new Map<string, number>()
+    for (const fragment of fragments) {
+      if (fragment.type === 'marker' || fragment.type === 'summary') continue
+      counts.set(fragment.type, (counts.get(fragment.type) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => a.value.localeCompare(b.value))
+  }, [fragments, supportsTypeFilter])
+
+  useEffect(() => {
+    if (!supportsTypeFilter) {
+      setTypeFilter('all')
+      return
+    }
+    if (typeFilter !== 'all' && !typeOptions.some((option) => option.value === typeFilter)) {
+      setTypeFilter('all')
+    }
+  }, [supportsTypeFilter, typeFilter, typeOptions])
 
   const filtered = useMemo(() => {
     if (!fragments) return []
@@ -626,13 +652,18 @@ export function FragmentList({
       list = list.filter((f) => allowedTypes.includes(f.type))
     }
 
+    if (supportsTypeFilter && typeFilter !== 'all') {
+      list = list.filter((f) => f.type === typeFilter)
+    }
+
     if (search.trim()) {
       const q = search.trim().toLowerCase()
       list = list.filter(
         (f) =>
           f.name.toLowerCase().includes(q) ||
           f.description.toLowerCase().includes(q) ||
-          f.id.toLowerCase().includes(q),
+          f.id.toLowerCase().includes(q) ||
+          f.type.toLowerCase().includes(q),
       )
     }
 
@@ -653,7 +684,7 @@ export function FragmentList({
     }
 
     return list
-  }, [fragments, search, sort, allowedTypes])
+  }, [fragments, search, sort, allowedTypes, supportsTypeFilter, typeFilter])
 
   // The effective flat list: during drag it's the live-reordered list, otherwise filtered
   const effectiveList = dragDisplayOrder ?? filtered
@@ -984,8 +1015,40 @@ export function FragmentList({
           className="h-7 text-xs bg-transparent"
           data-component-id={componentId(listIdBase ?? type ?? 'fragment', 'list-search')}
         />
-        <div className="flex items-center justify-between">
-          <div className="flex gap-0.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1">
+            {supportsTypeFilter && typeOptions.length > 1 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 min-w-0 max-w-[8.5rem] gap-1 px-1.5 text-[0.625rem] text-muted-foreground hover:text-foreground"
+                    data-component-id={componentId(listIdBase ?? type ?? 'fragment', 'type-filter')}
+                  >
+                    <ListFilter className="size-3.5 shrink-0" />
+                    <span className="truncate">{typeFilter === 'all' ? 'all types' : typeFilter}</span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-44">
+                  <DropdownMenuRadioGroup value={typeFilter} onValueChange={setTypeFilter}>
+                    <DropdownMenuRadioItem value="all" className="text-xs">
+                      <span className="min-w-0 flex-1 truncate">all types</span>
+                      <span className="ml-auto text-[0.625rem] text-muted-foreground">
+                        {typeOptions.reduce((sum, option) => sum + option.count, 0)}
+                      </span>
+                    </DropdownMenuRadioItem>
+                    {typeOptions.map((option) => (
+                      <DropdownMenuRadioItem key={option.value} value={option.value} className="text-xs">
+                        <span className="min-w-0 flex-1 truncate">{option.value}</span>
+                        <span className="ml-auto text-[0.625rem] text-muted-foreground">{option.count}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            <div className="flex gap-0.5">
             {([
               { mode: 'order' as SortMode, tip: 'Sort by manual order' },
               { mode: 'name' as SortMode, tip: 'Sort alphabetically' },
@@ -1009,6 +1072,7 @@ export function FragmentList({
                 <TooltipContent side="bottom">{tip}</TooltipContent>
               </Tooltip>
             ))}
+            </div>
           </div>
           <div className="flex gap-0.5">
             <Tooltip>

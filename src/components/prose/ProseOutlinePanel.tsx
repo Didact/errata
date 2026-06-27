@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { Bookmark, ArrowUpDown, ArrowDown, GripVertical } from 'lucide-react'
+import { Bookmark, ArrowUpDown, ArrowDown, GripVertical, X } from 'lucide-react'
 import type { Fragment } from '@/lib/api'
 
 interface ProseOutlinePanelProps {
@@ -11,6 +11,10 @@ interface ProseOutlinePanelProps {
   activeIndex: number
   open: boolean
   onJump: (index: number) => void
+  /** Mobile overlay variant: full-width, no side-rail chrome, always expanded. */
+  mobile?: boolean
+  /** When provided (mobile), renders a close control in the header. */
+  onClose?: () => void
 }
 
 export function ProseOutlinePanel({
@@ -19,6 +23,8 @@ export function ProseOutlinePanel({
   activeIndex,
   open,
   onJump,
+  mobile = false,
+  onClose,
 }: ProseOutlinePanelProps) {
   const activeRef = useRef<HTMLButtonElement>(null)
   const collapsedActiveRef = useRef<HTMLButtonElement>(null)
@@ -129,16 +135,21 @@ export function ProseOutlinePanel({
       {/* Outline panel */}
       <div
         data-component-id="prose-outline-panel"
-        className={`shrink-0 flex flex-col border-l border-border/40 bg-background/95 backdrop-blur-sm transition-all duration-250 ease-out overflow-hidden ${
-          open ? 'w-56' : 'w-7'
-        }`}
+        className={
+          mobile
+            ? 'flex flex-col w-full h-full overflow-hidden'
+            : `shrink-0 flex flex-col border-l border-border/40 bg-background/95 backdrop-blur-sm transition-all duration-250 ease-out overflow-hidden ${
+                open ? 'w-56' : 'w-7'
+              }`
+        }
       >
-        {open ? (
+        {(open || mobile) ? (
           /* --- Expanded view --- */
           <>
-            {/* Header — top padding clears the floating toolbar */}
-            <div className="shrink-0 px-4 pt-12 pb-3 flex items-center justify-between">
-              <h3 className="text-[0.625rem] uppercase tracking-[0.15em] text-muted-foreground font-medium">
+            {/* Header — on desktop top padding clears the floating toolbar;
+                in the mobile overlay there is none. */}
+            <div className={`shrink-0 px-4 ${mobile ? 'pt-4' : 'pt-12'} pb-3 flex items-center justify-between`}>
+              <h3 className={`uppercase tracking-[0.15em] text-muted-foreground font-medium ${mobile ? 'text-xs' : 'text-[0.625rem]'}`}>
                 Passages
               </h3>
               <div className="flex items-center gap-1">
@@ -171,6 +182,16 @@ export function ProseOutlinePanel({
                   </TooltipTrigger>
                   <TooltipContent side="left" className="text-[0.625rem]">Add chapter</TooltipContent>
                 </Tooltip>
+                {onClose && (
+                  <button
+                    onClick={onClose}
+                    aria-label="Close passages"
+                    data-component-id="prose-outline-close"
+                    className="flex items-center justify-center size-7 -mr-1.5 ml-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent/40 transition-colors"
+                  >
+                    <X className="size-4" />
+                  </button>
+                )}
               </div>
             </div>
 

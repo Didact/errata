@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { createLogger } from '../logging'
 import { writeJsonAtomic } from '../fs-utils'
+import { withKeyLock } from '../async-lock'
 
 const logger = createLogger('token-tracker')
 
@@ -97,6 +98,13 @@ interface FlushDelta {
 /** Buffered deltas waiting for flush */
 const pendingFlushData = new Map<string, FlushDelta[]>()
 
+/** Resolves a flush key back to its dataDir/storyId (key may contain ':' on Windows). */
+const flushTargets = new Map<string, { dataDir: string; storyId: string }>()
+
+function toTokenCount(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
 function incrementEntry(entry: UsageEntry, inputTokens: number, outputTokens: number): void {
   entry.inputTokens += inputTokens
   entry.outputTokens += outputTokens
@@ -109,11 +117,35 @@ function scheduleFlush(dataDir: string, storyId: string, delta: FlushDelta): voi
   const existing = pendingFlushData.get(key) ?? []
   existing.push(delta)
   pendingFlushData.set(key, existing)
+  flushTargets.set(key, { dataDir, storyId })
 
+  armFlushTimer(key, dataDir, storyId)
+}
+
+function armFlushTimer(key: string, dataDir: string, storyId: string): void {
   if (pendingWrites.has(key)) return // already scheduled
 
-  const timer = setTimeout(async () => {
+  const timer = setTimeout(() => {
     pendingWrites.delete(key)
+    void flushKey(key, dataDir, storyId).then(() => {
+      // Re-arm if deltas remain — either they arrived during the flush or were
+      // re-queued because the write failed. Without this they'd never drain.
+      if ((pendingFlushData.get(key)?.length ?? 0) > 0) {
+        armFlushTimer(key, dataDir, storyId)
+      }
+    })
+  }, FLUSH_DELAY_MS)
+
+  pendingWrites.set(key, timer)
+}
+
+/**
+ * Apply all buffered deltas for a key to the persistent file. Serialized per
+ * key so concurrent flushes can't race the read-modify-write and lose updates.
+ * On write failure the deltas are re-queued rather than dropped.
+ */
+async function flushKey(key: string, dataDir: string, storyId: string): Promise<void> {
+  await withKeyLock(`token-flush:${key}`, async () => {
     const deltas = pendingFlushData.get(key) ?? []
     pendingFlushData.delete(key)
     if (deltas.length === 0) return
@@ -143,11 +175,49 @@ function scheduleFlush(dataDir: string, storyId: string, delta: FlushDelta): voi
       project.updatedAt = new Date().toISOString()
       await writeProjectFile(dataDir, storyId, project)
     } catch (err) {
-      logger.error('Failed to flush token usage', { storyId, error: err instanceof Error ? err.message : String(err) })
+      // Re-queue the deltas so they aren't lost; they'll drain on the next flush.
+      const pending = pendingFlushData.get(key) ?? []
+      pendingFlushData.set(key, [...deltas, ...pending])
+      logger.error('Failed to flush token usage; re-queued deltas', { storyId, count: deltas.length, error: err instanceof Error ? err.message : String(err) })
     }
-  }, FLUSH_DELAY_MS)
+  })
+}
 
-  pendingWrites.set(key, timer)
+/**
+ * Force-flush all buffered token usage immediately. Call on server shutdown to
+ * avoid losing up to FLUSH_DELAY_MS of usage. Cancels pending timers first.
+ */
+export async function flushAllPendingTokenUsage(): Promise<void> {
+  const keys = [...pendingFlushData.keys()]
+  await Promise.all(
+    keys.map((key) => {
+      const timer = pendingWrites.get(key)
+      if (timer) {
+        clearTimeout(timer)
+        pendingWrites.delete(key)
+      }
+      const target = flushTargets.get(key)
+      if (!target) return Promise.resolve()
+      return flushKey(key, target.dataDir, target.storyId)
+    }),
+  )
+}
+
+// Best-effort drain when the event loop empties (graceful exit). SIGINT/SIGTERM
+// aren't hooked so we don't override the app's termination handling — callers
+// that catch those signals should await flushAllPendingTokenUsage() themselves.
+// Guard via a global symbol so re-evaluating this module (e.g. per test file)
+// doesn't pile up duplicate process listeners.
+const FLUSH_HOOK_KEY = Symbol.for('errata.tokenUsage.flushHookRegistered')
+if (
+  typeof process !== 'undefined' &&
+  typeof process.once === 'function' &&
+  !(globalThis as Record<symbol, unknown>)[FLUSH_HOOK_KEY]
+) {
+  ;(globalThis as Record<symbol, unknown>)[FLUSH_HOOK_KEY] = true
+  process.once('beforeExit', () => {
+    void flushAllPendingTokenUsage()
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +237,9 @@ export function reportUsage(
   usage: { inputTokens: number; outputTokens: number },
   modelId?: string,
 ): void {
-  if (!usage.inputTokens && !usage.outputTokens) return
+  const inputTokens = toTokenCount(usage.inputTokens)
+  const outputTokens = toTokenCount(usage.outputTokens)
+  if (!inputTokens && !outputTokens) return
 
   const model = modelId ?? 'unknown'
 
@@ -178,24 +250,24 @@ export function reportUsage(
     sessionByStory.set(storyId, storyMap)
   }
   const entry = storyMap.get(source) ?? { inputTokens: 0, outputTokens: 0, calls: 0, byModel: {} }
-  incrementEntry(entry, usage.inputTokens, usage.outputTokens)
+  incrementEntry(entry, inputTokens, outputTokens)
 
   const sourceModelEntry = entry.byModel[model] ?? { inputTokens: 0, outputTokens: 0, calls: 0 }
-  incrementEntry(sourceModelEntry, usage.inputTokens, usage.outputTokens)
+  incrementEntry(sourceModelEntry, inputTokens, outputTokens)
   entry.byModel[model] = sourceModelEntry
 
   storyMap.set(source, entry)
 
   // Session: global totals
-  incrementEntry(globalSession, usage.inputTokens, usage.outputTokens)
+  incrementEntry(globalSession, inputTokens, outputTokens)
 
   // Session: global by model
   const gModelEntry = globalSessionByModel.get(model) ?? { inputTokens: 0, outputTokens: 0, calls: 0 }
-  incrementEntry(gModelEntry, usage.inputTokens, usage.outputTokens)
+  incrementEntry(gModelEntry, inputTokens, outputTokens)
   globalSessionByModel.set(model, gModelEntry)
 
   // Persistent: debounced
-  scheduleFlush(dataDir, storyId, { source, modelId: model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens })
+  scheduleFlush(dataDir, storyId, { source, modelId: model, inputTokens, outputTokens })
 }
 
 export interface UsageSnapshot {

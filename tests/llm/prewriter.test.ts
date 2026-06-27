@@ -107,6 +107,77 @@ function createMockStreamResult(text: string) {
   }
 }
 
+function createMockPrewriterToolLoopResult(firstText: string, secondText: string) {
+  async function* generateFullStream() {
+    yield { type: 'text-delta' as const, text: firstText }
+    yield {
+      type: 'tool-call' as const,
+      toolCallId: 'call-directions',
+      toolName: 'suggestDirections',
+      input: {
+        directions: [
+          { pacing: 'linger', title: 'Linger', description: 'Stay here.', instruction: 'Stay here.' },
+          { pacing: 'continue', title: 'Continue', description: 'Move on.', instruction: 'Move on.' },
+          { pacing: 'end', title: 'End', description: 'Close it.', instruction: 'Close it.' },
+        ],
+      },
+    }
+    yield {
+      type: 'tool-result' as const,
+      toolCallId: 'call-directions',
+      toolName: 'suggestDirections',
+      output: { ok: true },
+    }
+    yield { type: 'finish' as const, finishReason: 'tool-calls' }
+    yield { type: 'text-delta' as const, text: secondText }
+    yield { type: 'finish' as const, finishReason: 'stop' }
+  }
+
+  return {
+    fullStream: generateFullStream(),
+    totalUsage: Promise.resolve({ inputTokens: 10, outputTokens: 20 }),
+  }
+}
+
+/**
+ * Prewriter stream where the model writes the brief in one step, then re-emits
+ * it in a second step before calling suggestDirections (a common multi-step
+ * pattern). Uses finish-step boundaries like a real AI SDK v6 stream.
+ */
+function createMockPrewriterDuplicateBriefAcrossSteps(brief: string) {
+  async function* generateFullStream() {
+    // Step 1: writes the brief, no terminal tool yet.
+    yield { type: 'text-delta' as const, text: brief }
+    yield { type: 'finish-step' as const }
+    // Step 2: re-writes the same brief, then calls suggestDirections.
+    yield { type: 'text-delta' as const, text: brief }
+    yield {
+      type: 'tool-call' as const,
+      toolCallId: 'call-directions',
+      toolName: 'suggestDirections',
+      input: {
+        directions: [
+          { pacing: 'linger', title: 'Linger', description: 'Stay.', instruction: 'Stay.' },
+          { pacing: 'continue', title: 'Continue', description: 'Go.', instruction: 'Go.' },
+          { pacing: 'end', title: 'End', description: 'Close.', instruction: 'Close.' },
+        ],
+      },
+    }
+    yield {
+      type: 'tool-result' as const,
+      toolCallId: 'call-directions',
+      toolName: 'suggestDirections',
+      output: { ok: true },
+    }
+    yield { type: 'finish-step' as const }
+    yield { type: 'finish' as const, finishReason: 'tool-calls' }
+  }
+  return {
+    fullStream: generateFullStream(),
+    totalUsage: Promise.resolve({ inputTokens: 10, outputTokens: 20 }),
+  }
+}
+
 /** Parse NDJSON response body into an array of events */
 async function parseNDJSON(res: Response): Promise<Array<Record<string, unknown>>> {
   const text = await res.text()
@@ -201,6 +272,14 @@ describe('prewriter', () => {
       // Brief should contain the prewriter output
       const writingBrief = blocks.find((b) => b.id === 'writing-brief')!
       expect(writingBrief.content).toContain(brief)
+    })
+
+    it('does not duplicate a leading writing brief heading from the prewriter', () => {
+      const blocks = createWriterBriefBlocks([], '## Writing Brief\n\nFocus on dialogue.', [])
+      const writingBrief = blocks.find((b) => b.id === 'writing-brief')!
+
+      expect(writingBrief.content.match(/## Writing Brief/g)).toHaveLength(1)
+      expect(writingBrief.content).toBe('## Writing Brief\n\nFocus on dialogue.')
     })
 
     it('omits tools block when no tool lines provided', () => {
@@ -363,6 +442,66 @@ describe('prewriter', () => {
 
       // Writer should NOT see the raw guideline content (that's in the full context, not the brief)
       expect(userText).not.toContain('Dark gothic style.')
+    })
+
+    it('does not append text generated after the prewriter directions tool returns', async () => {
+      await createStory(dataDir, makeStory({ generationMode: 'prewriter' }))
+
+      let callCount = 0
+      mockAgentStream.mockImplementation(() => {
+        callCount++
+        if (callCount === 1) {
+          return createMockPrewriterToolLoopResult('First brief.', 'Second repeated brief.') as any
+        }
+        return createMockStreamResult('Some prose.') as any
+      })
+
+      const res = await apiCall(`/stories/${storyId}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: 'Continue', saveResult: false }),
+      })
+
+      expect(res.status).toBe(200)
+      await res.text()
+
+      const writerArgs = mockAgentStream.mock.calls[1][0] as any
+      const writerText = writerArgs.messages!
+        .map((m: any) => typeof m.content === 'string' ? m.content : m.content?.map((p: any) => p.text).join('') ?? '')
+        .join('\n')
+
+      expect(writerText).toContain('First brief.')
+      expect(writerText).not.toContain('Second repeated brief.')
+    })
+
+    it('does not duplicate the brief when the model re-writes it across steps', async () => {
+      await createStory(dataDir, makeStory({ generationMode: 'prewriter' }))
+
+      let callCount = 0
+      mockAgentStream.mockImplementation(() => {
+        callCount++
+        if (callCount === 1) {
+          return createMockPrewriterDuplicateBriefAcrossSteps('Focus on the gathering storm.') as any
+        }
+        return createMockStreamResult('The storm broke.') as any
+      })
+
+      const res = await apiCall(`/stories/${storyId}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: 'Continue', saveResult: false }),
+      })
+      expect(res.status).toBe(200)
+      await res.text()
+
+      const writerArgs = mockAgentStream.mock.calls[1][0] as any
+      const writerText = writerArgs.messages!
+        .map((m: any) => typeof m.content === 'string' ? m.content : m.content?.map((p: any) => p.text).join('') ?? '')
+        .join('\n')
+
+      // The brief must appear exactly once in the writer's context.
+      const occurrences = writerText.split('Focus on the gathering storm.').length - 1
+      expect(occurrences).toBe(1)
     })
 
     it('prewriter mode saves prewriter metadata in generation log', async () => {
@@ -548,6 +687,38 @@ describe('prewriter', () => {
       expect(prewriterText).not.toContain('[@block=author-input]')
       // planning-request should still carry the direction
       expect(prewriterText).toContain('CONTINUE')
+    })
+
+    it('writer system instructions and tools do not leak into prewriter context', async () => {
+      await createStory(dataDir, makeStory({ generationMode: 'prewriter' }))
+
+      let callCount = 0
+      mockAgentStream.mockImplementation(() => {
+        callCount++
+        if (callCount === 1) return createMockStreamResult('A brief.') as any
+        return createMockStreamResult('Some prose.') as any
+      })
+
+      const res = await apiCall(`/stories/${storyId}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: 'Continue', saveResult: false }),
+      })
+      expect(res.status).toBe(200)
+      await res.text()
+
+      const prewriterArgs = mockAgentStream.mock.calls[0][0] as any
+      const prewriterText = prewriterArgs.messages!
+        .map((m: any) => typeof m.content === 'string' ? m.content : m.content?.map((p: any) => p.text).join('') ?? '')
+        .join('\n')
+
+      // The writer's own system prompt / tool guidance must not bleed into the
+      // planner's context (the planner has its own 'instructions' block, so we
+      // assert on the writer-specific wording rather than the block markers).
+      expect(prewriterText).not.toContain('Your task is to write prose that continues')
+      expect(prewriterText).not.toContain('Use these tools to retrieve details about characters')
+      // The planner's OWN instruction is still present.
+      expect(prewriterText).toContain('writing planner')
     })
 
     it('prewriter custom blocks do not leak into writer context', async () => {

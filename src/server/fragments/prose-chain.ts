@@ -4,6 +4,12 @@ import { join } from 'node:path'
 import type { ProseChain } from './schema'
 import { getContentRoot } from './branches'
 import { writeJsonAtomic } from '../fs-utils'
+import { withKeyLock } from '../async-lock'
+
+/** Serializes read-modify-write of a story's prose chain to prevent lost updates. */
+function lockKey(storyId: string): string {
+  return `prose-chain:${storyId}`
+}
 
 const PROSE_CHAIN_FILE = 'prose-chain.json'
 
@@ -66,17 +72,19 @@ export async function addProseSection(
   storyId: string,
   fragmentId: string,
 ): Promise<void> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    await initProseChain(dataDir, storyId, fragmentId)
-    return
-  }
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      await initProseChain(dataDir, storyId, fragmentId)
+      return
+    }
 
-  chain.entries.push({
-    proseFragments: [fragmentId],
-    active: fragmentId,
+    chain.entries.push({
+      proseFragments: [fragmentId],
+      active: fragmentId,
+    })
+    await saveProseChain(dataDir, storyId, chain)
   })
-  await saveProseChain(dataDir, storyId, chain)
 }
 
 /**
@@ -89,18 +97,20 @@ export async function insertProseSection(
   fragmentId: string,
   position: number,
 ): Promise<void> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    await initProseChain(dataDir, storyId, fragmentId)
-    return
-  }
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      await initProseChain(dataDir, storyId, fragmentId)
+      return
+    }
 
-  const clampedPosition = Math.max(0, Math.min(position, chain.entries.length))
-  chain.entries.splice(clampedPosition, 0, {
-    proseFragments: [fragmentId],
-    active: fragmentId,
+    const clampedPosition = Math.max(0, Math.min(position, chain.entries.length))
+    chain.entries.splice(clampedPosition, 0, {
+      proseFragments: [fragmentId],
+      active: fragmentId,
+    })
+    await saveProseChain(dataDir, storyId, chain)
   })
-  await saveProseChain(dataDir, storyId, chain)
 }
 
 /**
@@ -114,19 +124,21 @@ export async function addProseVariation(
   sectionIndex: number,
   fragmentId: string,
 ): Promise<void> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    throw new Error(`No prose chain found for story ${storyId}`)
-  }
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      throw new Error(`No prose chain found for story ${storyId}`)
+    }
 
-  if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
-    throw new Error(`Invalid section index ${sectionIndex}`)
-  }
+    if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
+      throw new Error(`Invalid section index ${sectionIndex}`)
+    }
 
-  const entry = chain.entries[sectionIndex]
-  entry.proseFragments.push(fragmentId)
-  entry.active = fragmentId
-  await saveProseChain(dataDir, storyId, chain)
+    const entry = chain.entries[sectionIndex]
+    entry.proseFragments.push(fragmentId)
+    entry.active = fragmentId
+    await saveProseChain(dataDir, storyId, chain)
+  })
 }
 
 /**
@@ -139,22 +151,24 @@ export async function switchActiveProse(
   sectionIndex: number,
   fragmentId: string,
 ): Promise<void> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    throw new Error(`No prose chain found for story ${storyId}`)
-  }
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      throw new Error(`No prose chain found for story ${storyId}`)
+    }
 
-  if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
-    throw new Error(`Invalid section index ${sectionIndex}`)
-  }
+    if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
+      throw new Error(`Invalid section index ${sectionIndex}`)
+    }
 
-  const entry = chain.entries[sectionIndex]
-  if (!entry.proseFragments.includes(fragmentId)) {
-    throw new Error(`Fragment ${fragmentId} is not a variation of section ${sectionIndex}`)
-  }
+    const entry = chain.entries[sectionIndex]
+    if (!entry.proseFragments.includes(fragmentId)) {
+      throw new Error(`Fragment ${fragmentId} is not a variation of section ${sectionIndex}`)
+    }
 
-  entry.active = fragmentId
-  await saveProseChain(dataDir, storyId, chain)
+    entry.active = fragmentId
+    await saveProseChain(dataDir, storyId, chain)
+  })
 }
 
 /**
@@ -182,18 +196,20 @@ export async function removeProseSection(
   storyId: string,
   sectionIndex: number,
 ): Promise<string[]> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    throw new Error(`No prose chain found for story ${storyId}`)
-  }
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      throw new Error(`No prose chain found for story ${storyId}`)
+    }
 
-  if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
-    throw new Error(`Invalid section index ${sectionIndex}`)
-  }
+    if (sectionIndex < 0 || sectionIndex >= chain.entries.length) {
+      throw new Error(`Invalid section index ${sectionIndex}`)
+    }
 
-  const removed = chain.entries.splice(sectionIndex, 1)[0]
-  await saveProseChain(dataDir, storyId, chain)
-  return removed.proseFragments
+    const removed = chain.entries.splice(sectionIndex, 1)[0]
+    await saveProseChain(dataDir, storyId, chain)
+    return removed.proseFragments
+  })
 }
 
 /**
@@ -206,27 +222,29 @@ export async function reorderProseSections(
   storyId: string,
   newOrder: number[],
 ): Promise<void> {
-  const chain = await getProseChain(dataDir, storyId)
-  if (!chain) {
-    throw new Error(`No prose chain found for story ${storyId}`)
-  }
-
-  const len = chain.entries.length
-  if (newOrder.length !== len) {
-    throw new Error(`Order array length ${newOrder.length} does not match chain length ${len}`)
-  }
-
-  // Validate all indices are present exactly once
-  const sorted = [...newOrder].sort((a, b) => a - b)
-  for (let i = 0; i < len; i++) {
-    if (sorted[i] !== i) {
-      throw new Error(`Invalid order array: must contain each index 0..${len - 1} exactly once`)
+  return withKeyLock(lockKey(storyId), async () => {
+    const chain = await getProseChain(dataDir, storyId)
+    if (!chain) {
+      throw new Error(`No prose chain found for story ${storyId}`)
     }
-  }
 
-  const oldEntries = chain.entries
-  chain.entries = newOrder.map(i => oldEntries[i])
-  await saveProseChain(dataDir, storyId, chain)
+    const len = chain.entries.length
+    if (newOrder.length !== len) {
+      throw new Error(`Order array length ${newOrder.length} does not match chain length ${len}`)
+    }
+
+    // Validate all indices are present exactly once
+    const sorted = [...newOrder].sort((a, b) => a - b)
+    for (let i = 0; i < len; i++) {
+      if (sorted[i] !== i) {
+        throw new Error(`Invalid order array: must contain each index 0..${len - 1} exactly once`)
+      }
+    }
+
+    const oldEntries = chain.entries
+    chain.entries = newOrder.map(i => oldEntries[i])
+    await saveProseChain(dataDir, storyId, chain)
+  })
 }
 
 /**

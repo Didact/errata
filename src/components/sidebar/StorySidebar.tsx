@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { api, type StoryMeta } from '@/lib/api'
 import {
@@ -15,6 +15,7 @@ import {
   SidebarMenuItem,
   SidebarSeparator,
   SidebarTrigger,
+  useSidebar,
 } from '@/components/ui/sidebar'
 import {
   Info,
@@ -36,22 +37,28 @@ import {
   CircleHelp,
   GitBranch,
   Radio,
+  Library,
 } from 'lucide-react'
 import { useHelp } from '@/hooks/use-help'
 import { componentId } from '@/lib/dom-ids'
+import { FragmentTypeIcon } from '@/components/fragments/fragment-type-icons'
 
 export type SidebarSection =
   | 'story-info'
+  | 'fragments'
   | 'characters'
   | 'guidelines'
   | 'knowledge'
+  | 'fragment-types'
   | 'media'
   | 'archive'
   | 'branches'
   | 'context-order'
   | 'agents'
   | 'settings'
+  | 'erratanet'
   | 'agent-activity'
+  | `fragment-type-${string}`
   | `plugin-${string}`
   | null
 
@@ -92,6 +99,7 @@ function PluginIcon({ icon }: { icon?: { type: 'lucide'; name: string } | { type
 }
 
 const FRAGMENT_SECTIONS = [
+  { id: 'fragments' as const, label: 'All fragments', icon: Hash },
   { id: 'guidelines' as const, label: 'Guidelines', icon: BookOpen },
   { id: 'characters' as const, label: 'Characters', icon: Users },
   { id: 'knowledge' as const, label: 'Knowledge', icon: Database },
@@ -105,8 +113,20 @@ export function StorySidebar({
   enabledPanelPlugins,
 }: StorySidebarProps) {
   const { openHelp } = useHelp()
+  const { isMobile, setOpenMobile } = useSidebar()
   const queryClient = useQueryClient()
   const [isDragOverArchive, setIsDragOverArchive] = useState(false)
+  // On mobile the sidebar is an overlay sheet (z above the detail panel).
+  // Dismiss it after a nav action so the chosen panel/prose is actually visible.
+  const dismissMobileSheet = () => {
+    if (isMobile) setOpenMobile(false)
+  }
+  const customFragmentSections = (story?.settings.customFragmentTypes ?? []).filter((type) => type.showInSidebar)
+
+  const { data: enetConfig } = useQuery({
+    queryKey: ['erratanet-config'],
+    queryFn: () => api.erratanet.getConfig(),
+  })
 
   const archiveMutation = useMutation({
     mutationFn: (fragmentId: string) => api.fragments.archive(storyId, fragmentId),
@@ -119,6 +139,7 @@ export function StorySidebar({
 
   const handleToggle = (section: SidebarSection) => {
     onSectionChange(activeSection === section ? null : section)
+    dismissMobileSheet()
   }
 
   return (
@@ -146,7 +167,7 @@ export function StorySidebar({
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={activeSection === null}
-                  onClick={() => onSectionChange(null)}
+                  onClick={() => { onSectionChange(null); dismissMobileSheet() }}
                   tooltip="Story"
                   data-component-id="sidebar-story-link"
                 >
@@ -174,14 +195,14 @@ export function StorySidebar({
                   data-component-id="sidebar-section-agent-activity"
                 >
                   <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" stroke="url(#librarian-grad)" />
-                    <path d="m9 9.5 2 2 4-4" stroke="url(#librarian-grad2)" />
+                    <path d="m21 17-2.156-1.868A.5.5 0 0 0 18 15.5v.5a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1c0-2.545-3.991-3.97-8.5-4a1 1 0 0 0 0 5c4.153 0 4.745-11.295 5.708-13.5a2.5 2.5 0 1 1 3.31 3.284" stroke="url(#librarian-grad)" />
+                    <path d="M3 21h18" stroke="url(#librarian-grad2)" />
                     <defs>
-                      <linearGradient id="librarian-grad" x1="4" y1="2" x2="20" y2="22">
+                      <linearGradient id="librarian-grad" x1="3" y1="4" x2="21" y2="18">
                         <stop offset="0%" stopColor="#f59e0b" />
                         <stop offset="100%" stopColor="#8b5cf6" />
                       </linearGradient>
-                      <linearGradient id="librarian-grad2" x1="9" y1="7.5" x2="15" y2="11.5">
+                      <linearGradient id="librarian-grad2" x1="3" y1="21" x2="21" y2="21">
                         <stop offset="0%" stopColor="#8b5cf6" />
                         <stop offset="100%" stopColor="#ec4899" />
                       </linearGradient>
@@ -199,7 +220,7 @@ export function StorySidebar({
 
         {/* Fragments */}
         <SidebarGroup>
-          <SidebarGroupLabel className="text-[0.625rem] uppercase tracking-widest text-muted-foreground font-medium">
+          <SidebarGroupLabel className="text-[0.875rem] font-display text-muted-foreground">
             Fragments
           </SidebarGroupLabel>
           <SidebarGroupContent>
@@ -218,6 +239,20 @@ export function StorySidebar({
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ))}
+              {customFragmentSections.map((section) => (
+                <SidebarMenuItem key={section.type}>
+                  <SidebarMenuButton
+                    isActive={activeSection === `fragment-type-${section.type}`}
+                    onClick={() => handleToggle(`fragment-type-${section.type}`)}
+                    tooltip={section.name}
+                    data-component-id={componentId('sidebar-section', section.type)}
+                  >
+                    <FragmentTypeIcon icon={section.icon} className="size-4" />
+                    <span>{section.name}</span>
+                    <ChevronRight className="ml-auto size-3.5 text-muted-foreground" />
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -225,8 +260,8 @@ export function StorySidebar({
         <SidebarSeparator />
 
         <SidebarGroup>
-          <SidebarGroupLabel className="text-[0.625rem] uppercase tracking-widest text-muted-foreground font-medium">
-            Management
+          <SidebarGroupLabel className="text-[0.875rem] font-display text-muted-foreground">
+            Workshop
           </SidebarGroupLabel>
           <SidebarGroupContent>
               <SidebarMenu>
@@ -239,6 +274,19 @@ export function StorySidebar({
                 >
                   <Radio className="size-4" />
                   <span>Agents</span>
+                  <ChevronRight className="ml-auto size-3.5 text-muted-foreground" />
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={activeSection === 'fragment-types'}
+                  onClick={() => handleToggle('fragment-types')}
+                  tooltip="Fragment Types"
+                  data-component-id="sidebar-section-fragment-types"
+                >
+                  <Wrench className="size-4" />
+                  <span>Fragment Types</span>
                   <ChevronRight className="ml-auto size-3.5 text-muted-foreground" />
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -328,7 +376,7 @@ export function StorySidebar({
           <>
             <SidebarSeparator />
             <SidebarGroup>
-              <SidebarGroupLabel className="text-[0.625rem] uppercase tracking-widest text-muted-foreground font-medium">
+              <SidebarGroupLabel className="text-[0.875rem] font-display text-muted-foreground">
                 Plugins
               </SidebarGroupLabel>
               <SidebarGroupContent>
@@ -359,7 +407,7 @@ export function StorySidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
-              onClick={() => openHelp()}
+              onClick={() => { openHelp(); dismissMobileSheet() }}
               tooltip="Help"
               data-component-id="sidebar-help-button"
             >
@@ -367,6 +415,20 @@ export function StorySidebar({
               <span>Help</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {enetConfig?.enabled && (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                isActive={activeSection === 'erratanet'}
+                onClick={() => handleToggle('erratanet')}
+                tooltip="ErrataNet"
+                data-component-id="sidebar-section-erratanet"
+              >
+                <Library className="size-4" />
+                <span>ErrataNet</span>
+                <ChevronRight className="ml-auto size-3.5 text-muted-foreground" />
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
           <SidebarMenuItem>
             <SidebarMenuButton
               isActive={activeSection === 'settings'}

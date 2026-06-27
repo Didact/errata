@@ -2,17 +2,36 @@ import { pluginRegistry } from './plugins/registry'
 import { loadAllPlugins } from './plugins/loader'
 import { clearRuntimePluginUi } from './plugins/runtime-ui'
 import { createApp } from './api'
+import { reconcileSharing } from './sharing/manager'
+import { ensureOpenRouterOAuthCallbackBridge } from './openrouter-oauth-callback'
 import type { WritingPlugin } from './plugins/types'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 async function ensureStartupDirectories(dataDir: string, pluginDir?: string) {
   await mkdir(dataDir, { recursive: true })
   await mkdir(join(dataDir, 'stories'), { recursive: true })
-  await mkdir(join(dataDir, 'instruction-sets'), { recursive: true })
 
   if (pluginDir) {
     await mkdir(pluginDir, { recursive: true })
+  }
+}
+
+/**
+ * The model-specific instruction-override layer (data/instruction-sets/*.json)
+ * was removed in favor of agent blocks. Files left behind by an older install
+ * would otherwise stop applying with zero signal — say so once at startup.
+ */
+async function warnAboutOrphanedInstructionSets(dataDir: string) {
+  try {
+    const entries = await readdir(join(dataDir, 'instruction-sets'))
+    if (entries.some((e) => e.endsWith('.json'))) {
+      console.warn(
+        '[instructions] data/instruction-sets/ contains override files, but model-specific instruction overrides were removed and these files are no longer applied. Recreate the customizations as agent blocks (Settings > Advanced prompt control), then delete the directory to silence this warning.',
+      )
+    }
+  } catch {
+    // Directory absent: nothing to warn about.
   }
 }
 
@@ -43,6 +62,7 @@ async function initializeApp() {
   const allowExternalOverride = process.env.PLUGIN_EXTERNAL_OVERRIDE === '1'
 
   await ensureStartupDirectories(dataDir, externalPluginsDir)
+  await warnAboutOrphanedInstructionSets(dataDir)
 
   if (externalPluginsDir) {
     try {
@@ -88,7 +108,15 @@ async function initializeApp() {
   )
 
   // Create the app after plugins are loaded, so plugin routes get mounted
-  return createApp(dataDir)
+  const app = createApp(dataDir)
+
+  // Restore network sharing (LAN proxy / tunnel) if it was enabled. Only the
+  // production/dev entry (getApp) reconciles; tests calling createApp directly
+  // never start the proxy machinery.
+  void reconcileSharing(dataDir).catch((err) => console.error('[sharing] startup reconcile failed:', err))
+  void ensureOpenRouterOAuthCallbackBridge()
+
+  return app
 }
 
 let appPromise: Promise<ReturnType<typeof createApp>> | null = null

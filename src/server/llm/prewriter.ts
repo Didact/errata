@@ -1,4 +1,4 @@
-import { tool, ToolLoopAgent, stepCountIs, type ToolSet, type ProviderOptions } from 'ai'
+import { tool, ToolLoopAgent, stepCountIs, hasToolCall, type ToolSet, type ProviderOptions } from 'ai'
 import { z } from 'zod/v4'
 import { getModel } from './client'
 import { compileBlocks, expandMessagesFragmentTags, type ContextBlock, type ContextMessage } from './context-builder'
@@ -10,6 +10,7 @@ import type { AgentBlockContext } from '../agents/agent-block-context'
 import type { Fragment } from '../fragments/schema'
 import type { TokenUsage } from './generation-logs'
 import { reportUsage } from './token-tracker'
+import { normalizeTokenUsage } from './usage-normalizer'
 import { createLogger } from '../logging'
 
 const logger = createLogger('prewriter')
@@ -42,7 +43,8 @@ Your brief MUST include:
    - "Do NOT skip ahead in time"
    - "Do NOT introduce new characters"
 
-Keep the brief under 1000 words. Be direct and specific.
+Be direct and specific. The Reasoning Length guidance below sets how long and
+how deeply to plan — follow it for the brief's length and level of detail.
 Spend the most space on CHARACTER VOICES — the writer depends entirely on your
 character direction to capture each character faithfully.
 
@@ -68,12 +70,93 @@ export interface PrewriterDirection {
   instruction: string
 }
 
+/** Hard cap on how many question rounds the prewriter may run before it must finalize. */
+export const MAX_CLARIFY_ROUNDS = 3
+
+/** How much the prewriter deliberates — trades speed against depth. */
+export type PrewriterReasoning = 'short' | 'normal' | 'extensive'
+
+/**
+ * Per-level guidance appended to the prewriter prompt. The prompt is the primary
+ * lever (brief length + how much to deliberate); the route additionally scales
+ * the prewriter's tool-step budget so 'short' is genuinely faster.
+ */
+export const PREWRITER_REASONING_DIRECTIVES: Record<PrewriterReasoning, string> = {
+  short: `## Reasoning Length: SHORT — favor speed
+Move fast. Do NOT deliberate at length or chase optional tool lookups — decide
+from the context you already have. Write a tight, skimmable brief of roughly
+300 words. Give voice notes only for characters who actually speak in this
+scene, a line or two each. Getting the writer moving quickly matters more than
+exhaustive coverage.`,
+  normal: `## Reasoning Length: NORMAL — balanced
+Plan thoughtfully but efficiently. Aim for a brief of around 800 words. Cover
+the active characters' voices well without exhausting every detail.`,
+  extensive: `## Reasoning Length: EXTENSIVE — favor depth
+Reason thoroughly before committing. Weigh subtext, character interiority, and
+alternative beats, and look things up when it genuinely helps. Write a detailed
+brief (1200–1800 words is fine). Give every active character a rich voice
+profile with an example line, and think carefully about pacing and exactly
+where this passage should end.`,
+}
+
+/** Appended to the prewriter prompt when clarify-before-generate is enabled. */
+export const CLARIFY_INSTRUCTIONS = `## Clarifying Questions
+
+Before writing the brief, judge whether the author's direction is genuinely
+ambiguous — missing intent, unclear POV or which character acts, undefined
+stakes, or a fork you cannot resolve from context.
+
+- If everything you need is clear, DO NOT ask. Proceed straight to the brief.
+- If you genuinely need input, call the askQuestions tool with up to 4 focused
+  questions. For each question, supply 2-4 concrete options when you can
+  enumerate the likely answers; omit options for open-ended questions.
+- If you call askQuestions, STOP — do not also write a brief or call
+  suggestDirections. The author will answer and you will be re-invoked.
+- Never re-ask anything the author has already answered.`
+
+export interface ClarifyQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface ClarifyQuestion {
+  question: string
+  header: string
+  multiSelect: boolean
+  options?: ClarifyQuestionOption[]
+}
+
+/** Schema for a single clarifying question the prewriter may ask the author. */
+export const ClarifyQuestionSchema = z.object({
+  question: z.string().describe('The question to ask the author'),
+  header: z.string().max(12).describe('Short chip label, <= 12 chars'),
+  multiSelect: z.boolean().default(false).describe('Allow selecting multiple options'),
+  options: z
+    .array(z.object({ label: z.string(), description: z.string().optional() }))
+    .min(2)
+    .max(4)
+    .optional()
+    .describe('2-4 suggested options, or omit for a free-text answer'),
+})
+
+/** Input schema for the askQuestions tool: 1–4 clarifying questions. */
+export const ClarifyQuestionsInputSchema = z.object({
+  questions: z.array(ClarifyQuestionSchema).min(1).max(4),
+})
+
+export interface Clarification {
+  question: string
+  answer: string
+}
+
 export type PrewriterEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'text'; text: string }
+  | { type: 'reset' }
   | { type: 'tool-call'; id: string; toolName: string; args: Record<string, unknown> }
   | { type: 'tool-result'; id: string; toolName: string; result: unknown }
   | { type: 'directions'; directions: PrewriterDirection[] }
+  | { type: 'questions'; questions: ClarifyQuestion[] }
 
 export interface RunPrewriterArgs {
   dataDir: string
@@ -86,6 +169,14 @@ export interface RunPrewriterArgs {
   abortSignal?: AbortSignal
   onEvent?: (event: PrewriterEvent) => void
   providerOptions?: ProviderOptions
+  /** Allow the prewriter to ask clarifying questions via the askQuestions tool. */
+  clarifyEnabled?: boolean
+  /** Prior question/answer pairs from earlier clarify rounds, rendered into the prompt. */
+  clarifications?: Clarification[]
+  /** Which clarify round this is (0-based). At MAX_CLARIFY_ROUNDS the ask tool is withheld. */
+  round?: number
+  /** How much the prewriter deliberates (brief length + depth). Defaults to 'normal'. */
+  reasoning?: PrewriterReasoning
 }
 
 export interface PrewriterResult {
@@ -98,6 +189,8 @@ export interface PrewriterResult {
   durationMs: number
   model: string
   usage?: TokenUsage
+  /** Set when the prewriter asked the author clarifying questions instead of finalizing a brief. */
+  questions?: ClarifyQuestion[]
 }
 
 /**
@@ -106,8 +199,9 @@ export interface PrewriterResult {
  * that the writer will use instead of the full context.
  */
 export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterResult> {
-  const { dataDir, storyId, compiledMessages, authorInput, mode, tools, maxSteps = 3, abortSignal, onEvent, providerOptions } = args
+  const { dataDir, storyId, compiledMessages, authorInput, mode, tools, maxSteps = 3, abortSignal, onEvent, providerOptions, clarifyEnabled = false, clarifications = [], round = 0, reasoning = 'normal' } = args
   const requestLogger = logger.child({ storyId })
+  const canAskQuestions = clarifyEnabled && round < MAX_CLARIFY_ROUNDS
 
   const startTime = Date.now()
   const { model, modelId, temperature } = await getModel(dataDir, storyId, { role: 'generation.prewriter' })
@@ -154,11 +248,45 @@ export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterRes
     refine: `The author wants to REFINE/EDIT the latest passage. Their direction: ${authorInput}\n\nCreate a writing brief that addresses the author's refinement request while maintaining continuity.`,
   }
 
-  prewriterBlocks = prewriterBlocks.map(b =>
-    b.id === 'planning-request'
-      ? { ...b, content: modePrompts[mode] ?? modePrompts.generate }
-      : b,
-  )
+  prewriterBlocks = prewriterBlocks.map(b => {
+    if (b.id !== 'planning-request') return b
+    let content = modePrompts[mode] ?? modePrompts.generate
+    if (clarifications.length > 0) {
+      content += '\n\n## The Author Already Answered These Questions\n'
+        + clarifications.map(c => `Q: ${c.question}\nA: ${c.answer}`).join('\n\n')
+        + '\n\nUse these answers. Do not ask about anything answered above.'
+    }
+    return { ...b, content }
+  })
+
+  // Reasoning-length guidance — its own block so it survives user overrides of
+  // the base instructions and renders right after them.
+  prewriterBlocks = [
+    ...prewriterBlocks,
+    {
+      id: 'reasoning-length',
+      role: 'system' as const,
+      content: PREWRITER_REASONING_DIRECTIVES[reasoning],
+      order: 110,
+      source: 'builtin',
+    },
+  ]
+
+  // When clarify is enabled, append guidance telling the prewriter it may ask
+  // questions via the askQuestions tool. Kept as its own block so it survives
+  // user block overrides of the base instructions.
+  if (canAskQuestions) {
+    prewriterBlocks = [
+      ...prewriterBlocks,
+      {
+        id: 'clarify-instructions',
+        role: 'system' as const,
+        content: CLARIFY_INSTRUCTIONS,
+        order: 150,
+        source: 'builtin',
+      },
+    ]
+  }
 
   let prewriterMessages = compileBlocks(prewriterBlocks)
   prewriterMessages = await expandMessagesFragmentTags(prewriterMessages, dataDir, storyId)
@@ -183,31 +311,72 @@ export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterRes
     },
   })
 
-  const mergedTools: ToolSet = { ...(tools ?? {}), suggestDirections: directionsTool }
+  // Clarify tool — captures questions via closure. When the prewriter calls it,
+  // we treat the turn as terminal: the caller surfaces the questions and skips
+  // the writer entirely (no brief is produced this round).
+  let capturedQuestions: ClarifyQuestion[] | null = null
+  const askQuestionsTool = tool({
+    description: 'Ask the author up to 4 clarifying questions before writing. Use ONLY when the direction is genuinely ambiguous. Calling this ends your turn — do not also write a brief or suggest directions.',
+    inputSchema: ClarifyQuestionsInputSchema,
+    execute: async ({ questions }) => {
+      capturedQuestions = questions as ClarifyQuestion[]
+      onEvent?.({ type: 'questions', questions: capturedQuestions })
+      return { ok: true, asked: questions.length }
+    },
+  })
+
+  const mergedTools: ToolSet = {
+    ...(tools ?? {}),
+    suggestDirections: directionsTool,
+    ...(canAskQuestions ? { askQuestions: askQuestionsTool } : {}),
+  }
   const agent = new ToolLoopAgent({
     model,
     tools: mergedTools,
     toolChoice: 'auto',
-    stopWhen: stepCountIs(maxSteps),
+    stopWhen: [
+      stepCountIs(maxSteps),
+      hasToolCall('suggestDirections'),
+      hasToolCall('askQuestions'),
+    ],
     temperature,
     providerOptions,
   })
 
-  let fullText = ''
+  // The brief is the text of the LATEST step that produced text. Capturing per
+  // step (and keeping the last non-empty one) avoids concatenating drafts when a
+  // model re-writes the brief across steps — e.g. writes it, looks a detail up,
+  // then re-emits it in the same turn it calls suggestDirections. Accumulating
+  // every text-delta would otherwise hand the writer the brief twice.
+  let briefText = ''
+  let currentStepText = ''
   let fullReasoning = ''
   let stepCount = 0
+  let terminalToolReturned = false
   const result = await agent.stream({
     messages: prewriterMessages,
     abortSignal,
   })
 
+  const captureStepBrief = () => {
+    if (currentStepText.trim()) briefText = currentStepText
+    currentStepText = ''
+  }
+
   for await (const part of result.fullStream) {
     const p = part as Record<string, unknown>
     if (part.type === 'text-delta') {
+      if (terminalToolReturned) continue
       const text = (p.text ?? '') as string
-      fullText += text
+      // A fresh step starting to (re)write the brief supersedes the prior draft —
+      // signal the client to clear the brief streamed so far.
+      if (currentStepText === '' && briefText !== '') {
+        onEvent?.({ type: 'reset' })
+      }
+      currentStepText += text
       onEvent?.({ type: 'text', text })
     } else if (part.type === 'reasoning-delta') {
+      if (terminalToolReturned) continue
       const text = (p.text ?? '') as string
       fullReasoning += text
       onEvent?.({ type: 'reasoning', text })
@@ -219,28 +388,32 @@ export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterRes
         args: (p.input ?? {}) as Record<string, unknown>,
       })
     } else if (part.type === 'tool-result') {
+      if (p.toolName === 'suggestDirections' || p.toolName === 'askQuestions') {
+        terminalToolReturned = true
+      }
       onEvent?.({
         type: 'tool-result',
         id: p.toolCallId as string,
         toolName: (p.toolName as string) ?? '',
         result: p.output,
       })
-    } else if (part.type === 'finish') {
+    } else if (part.type === 'finish-step') {
+      // One step per LLM round-trip. `finish` (singular) fires once for the
+      // whole run, so counting it would always yield 1.
       stepCount++
+      captureStepBrief()
     }
   }
+  // The final step may close with `finish` rather than `finish-step` (and some
+  // providers/mocks emit only `finish`) — keep its text.
+  captureStepBrief()
 
   const durationMs = Date.now() - startTime
 
   let usage: TokenUsage | undefined
   try {
     const rawUsage = await result.totalUsage
-    if (rawUsage && typeof rawUsage.inputTokens === 'number') {
-      usage = {
-        inputTokens: rawUsage.inputTokens,
-        outputTokens: rawUsage.outputTokens ?? 0,
-      }
-    }
+    usage = normalizeTokenUsage(rawUsage)
   } catch {
     // Some providers may not report usage
   }
@@ -249,7 +422,7 @@ export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterRes
     reportUsage(dataDir, storyId, 'generation.prewriter', usage, modelId)
   }
 
-  requestLogger.info('Prewriter completed', { durationMs, briefLength: fullText.length })
+  requestLogger.info('Prewriter completed', { durationMs, briefLength: briefText.length })
 
   const serializedMessages = prewriterMessages.map(m => ({
     role: String(m.role),
@@ -261,7 +434,7 @@ export async function runPrewriter(args: RunPrewriterArgs): Promise<PrewriterRes
 
   requestLogger.info('Prewriter steps used', { stepCount })
 
-  return { brief: fullText, reasoning: fullReasoning, messages: serializedMessages, customBlocks, directions: capturedDirections, stepCount, durationMs, model: modelId, usage }
+  return { brief: briefText, reasoning: fullReasoning, messages: serializedMessages, customBlocks, directions: capturedDirections, stepCount, durationMs, model: modelId, usage, questions: capturedQuestions ?? undefined }
 }
 
 /**
@@ -330,6 +503,10 @@ export function createWriterBriefBlocks(
   modelId?: string,
 ): ContextBlock[] {
   const blocks: ContextBlock[] = []
+  const normalizedBrief = brief
+    .replace(/^\s{0,3}#{1,6}\s*Writing Brief\s*\n+/i, '')
+    .replace(/^\s*Writing Brief\s*:\s*\n+/i, '')
+    .trim()
 
   blocks.push({
     id: 'instructions',
@@ -387,7 +564,7 @@ export function createWriterBriefBlocks(
   blocks.push({
     id: 'writing-brief',
     role: 'user' as const,
-    content: `## Writing Brief\n\n${brief}`,
+    content: `## Writing Brief\n\n${normalizedBrief}`,
     order: 200,
     source: 'builtin',
   })

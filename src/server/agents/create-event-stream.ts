@@ -2,9 +2,16 @@ import type { AgentStreamEvent, AgentStreamCompletion, AgentStreamResult } from 
 
 /**
  * Converts an AI SDK v6 fullStream into an NDJSON event stream + completion promise.
- * Handles: text-delta, reasoning-delta, tool-call, tool-result, finish.
+ * Handles: text-delta, reasoning-delta, tool-call, tool-result, finish-step, finish.
+ *
+ * @param onCancel - invoked when the returned stream is cancelled (client
+ *   disconnect). Wire this to an AbortController so the underlying LLM call
+ *   stops instead of running to completion against a dead consumer.
  */
-export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStreamResult {
+export function createEventStream(
+  fullStream: AsyncIterable<unknown>,
+  onCancel?: () => void,
+): AgentStreamResult {
   let completionResolve: (val: AgentStreamCompletion) => void
   let completionReject: (err: unknown) => void
   const completion = new Promise<AgentStreamCompletion>((resolve, reject) => {
@@ -15,6 +22,8 @@ export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStre
   let fullText = ''
   let fullReasoning = ''
   const toolCalls: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = []
+  // Correlate a tool-result back to the args from its tool-call event.
+  const toolCallArgs = new Map<string, Record<string, unknown>>()
   let lastFinishReason = 'unknown'
   let stepCount = 0
 
@@ -41,9 +50,11 @@ export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStre
             }
             case 'tool-call': {
               const input = (p.input ?? {}) as Record<string, unknown>
+              const toolCallId = p.toolCallId as string
+              toolCallArgs.set(toolCallId, input)
               event = {
                 type: 'tool-call',
-                id: p.toolCallId as string,
+                id: toolCallId,
                 toolName: p.toolName as string,
                 args: input,
               }
@@ -52,7 +63,7 @@ export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStre
             case 'tool-result': {
               const toolCallId = p.toolCallId as string
               const toolName = (p.toolName as string) ?? ''
-              toolCalls.push({ toolName, args: {}, result: p.output })
+              toolCalls.push({ toolName, args: toolCallArgs.get(toolCallId) ?? {}, result: p.output })
               event = {
                 type: 'tool-result',
                 id: toolCallId,
@@ -61,9 +72,13 @@ export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStre
               }
               break
             }
+            // `finish-step` fires once per LLM step; `finish` fires once for the
+            // whole generation. Count steps, capture the final reason.
+            case 'finish-step':
+              stepCount++
+              break
             case 'finish':
               lastFinishReason = (p.finishReason as string) ?? 'unknown'
-              stepCount++
               break
           }
 
@@ -92,6 +107,10 @@ export function createEventStream(fullStream: AsyncIterable<unknown>): AgentStre
         controller.error(err)
         completionReject!(err)
       }
+    },
+    cancel() {
+      // Consumer (HTTP client) went away — stop the underlying LLM call.
+      onCancel?.()
     },
   })
 

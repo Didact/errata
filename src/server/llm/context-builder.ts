@@ -804,7 +804,9 @@ export async function expandFragmentTags(
   for (const m of matches) {
     // Detect circular reference
     if (ancestors.has(m.id)) {
-      result = result.replace(m.full, `[circular fragment: ${m.id}]`)
+      // Use a function replacer so `$` sequences in the tag are never treated
+      // as replacement patterns (they can't be here, but keep it uniform).
+      result = result.replace(m.full, () => `[circular fragment: ${m.id}]`)
       continue
     }
 
@@ -829,7 +831,9 @@ export async function expandFragmentTags(
         )
       }
     }
-    result = result.replace(m.full, replacement)
+    // Function replacer: a string replacement would interpret `$&`, `$1`, `$$`,
+    // etc. inside fragment content as special patterns and corrupt the output.
+    result = result.replace(m.full, () => replacement)
   }
 
   return result
@@ -877,7 +881,14 @@ export function addCacheBreakpoints(messages: ContextMessage[]): ModelMessage[] 
 
     if (msg.role === 'user') {
       const marker = '[@block=author-input]'
-      const splitIndex = msg.content.indexOf(marker)
+      let splitIndex = msg.content.indexOf(marker)
+
+      // Prewriter writer-brief context has no author-input block — the brief is
+      // the volatile tail and the recent prose before it is the stable, cacheable
+      // prefix. Split there so the prose prefix still gets a cache breakpoint.
+      if (splitIndex === -1) {
+        splitIndex = msg.content.indexOf('[@block=writing-brief]')
+      }
 
       if (splitIndex === -1) {
         return { role: 'user', content: msg.content }

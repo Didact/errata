@@ -98,6 +98,58 @@ describe('Story API routes', () => {
     expect(data.settings.disableLibrarianAutoAnalysis).toBe(true)
   })
 
+  it('PATCH /api/stories/:id/settings clears guided prompt overrides when saved empty', async () => {
+    const created = await (await apiJson('/stories', story)).json()
+    const setRes = await apiJson(
+      `/stories/${created.id}/settings`,
+      { guidedContinuePrompt: 'Custom continue prompt' },
+      'PATCH'
+    )
+    expect(setRes.status).toBe(200)
+    expect((await setRes.json()).settings.guidedContinuePrompt).toBe('Custom continue prompt')
+
+    const clearRes = await apiJson(
+      `/stories/${created.id}/settings`,
+      { guidedContinuePrompt: '' },
+      'PATCH'
+    )
+
+    expect(clearRes.status).toBe(200)
+    const cleared = await clearRes.json()
+    expect(cleared.settings).not.toHaveProperty('guidedContinuePrompt')
+
+    const reloadRes = await api(`/stories/${created.id}`)
+    const reloaded = await reloadRes.json()
+    expect(reloaded.settings).not.toHaveProperty('guidedContinuePrompt')
+  })
+
+  it('PATCH /api/stories/:id/settings persists custom fragment types', async () => {
+    const created = await (await apiJson('/stories', story)).json()
+    const res = await apiJson(
+      `/stories/${created.id}/settings`,
+      {
+        customFragmentTypes: [{
+          type: 'location',
+          name: 'Locations',
+          description: 'Places and geography',
+          icon: 'MapPin',
+          showInSidebar: true,
+        }],
+      },
+      'PATCH',
+    )
+
+    expect(res.status).toBe(200)
+    const data = await res.json()
+    expect(data.settings.customFragmentTypes).toEqual([{
+      type: 'location',
+      name: 'Locations',
+      description: 'Places and geography',
+      icon: 'MapPin',
+      showInSidebar: true,
+    }])
+  })
+
   it('DELETE /api/stories/:id deletes a story', async () => {
     const created = await (await apiJson('/stories', story)).json()
     const res = await api(`/stories/${created.id}`, { method: 'DELETE' })
@@ -133,6 +185,24 @@ describe('Fragment API routes', () => {
     const data = await res.json()
     expect(data.id).toMatch(/^pr-/)
     expect(data.name).toBe('Opening')
+  })
+
+  it('POST /api/stories/:sid/fragments creates a custom typed fragment', async () => {
+    const res = await apiJson(`/stories/${storyId}/fragments`, {
+      type: 'location',
+      name: 'The High Library',
+      description: 'A hidden archive',
+      content: 'A city-scale library under the old station.',
+    })
+    expect(res.status).toBe(200)
+    const data = await res.json()
+    expect(data.id).toMatch(/^loca-/)
+    expect(data.type).toBe('location')
+
+    const listRes = await api(`/stories/${storyId}/fragments?type=location`)
+    const listData = await listRes.json()
+    expect(listData).toHaveLength(1)
+    expect(listData[0].id).toBe(data.id)
   })
 
   it('GET /api/stories/:sid/fragments lists fragments', async () => {
@@ -374,5 +444,35 @@ describe('Fragment types route', () => {
       'prose',
       'summary',
     ])
+  })
+
+  it('GET /api/stories/:sid/fragment-types includes story custom types', async () => {
+    await apiJson(
+      `/stories/${storyId}/settings`,
+      {
+        customFragmentTypes: [{
+          type: 'location',
+          name: 'Locations',
+          description: 'Places and geography',
+          icon: 'MapPin',
+          showInSidebar: true,
+        }],
+      },
+      'PATCH',
+    )
+
+    const res = await api(`/stories/${storyId}/fragment-types`)
+    expect(res.status).toBe(200)
+    const data = await res.json()
+    expect(data).toContainEqual({
+      type: 'location',
+      prefix: 'loca',
+      stickyByDefault: false,
+      name: 'Locations',
+      description: 'Places and geography',
+      icon: 'MapPin',
+      custom: true,
+      showInSidebar: true,
+    })
   })
 })

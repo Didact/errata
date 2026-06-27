@@ -8,6 +8,16 @@ export const FragmentTypeSchema = z.string().min(1)
 
 export type FragmentType = z.infer<typeof FragmentTypeSchema>
 
+export const CustomFragmentTypeSchema = z.object({
+  type: z.string().min(1).max(40).regex(/^[a-z0-9][a-z0-9_-]*$/),
+  name: z.string().min(1).max(60),
+  description: z.string().max(250).default(''),
+  icon: z.string().max(40).default('Hash'),
+  showInSidebar: z.boolean().default(true),
+})
+
+export type CustomFragmentType = z.infer<typeof CustomFragmentTypeSchema>
+
 export const FragmentSchema = z.object({
   id: FragmentIdSchema,
   type: FragmentTypeSchema,
@@ -108,12 +118,19 @@ export const StoryMetaSchema = z.object({
       directionsProviderId: z.string().nullable().optional(),
       directionsModelId: z.string().nullable().optional(),
       generationMode: z.enum(['standard', 'prewriter']).default('standard'),
+      // Let the prewriter ask the author clarifying questions before writing.
+      // Only takes effect in prewriter mode. Off by default.
+      clarifyBeforeGenerate: z.boolean().default(false),
+      // How much the prewriter deliberates. 'short' favors speed (terse brief,
+      // fewer tool steps), 'extensive' favors depth. Only used in prewriter mode.
+      prewriterReasoning: z.enum(['short', 'normal', 'extensive']).default('normal'),
       disableLibrarianAutoAnalysis: z.boolean().default(false),
       autoApplyLibrarianSuggestions: z.boolean().default(false),
       disableLibrarianDirections: z.boolean().default(false),
       disableLibrarianSuggestions: z.boolean().default(false),
       contextOrderMode: z.enum(['simple', 'advanced']).default('simple'),
       fragmentOrder: z.array(z.string()).default([]),
+      customFragmentTypes: z.array(CustomFragmentTypeSchema).default([]),
       enabledBuiltinTools: z.array(z.string()).optional(),
       contextCompact: z.object({
         type: z.enum(['proseLimit', 'maxTokens', 'maxCharacters']),
@@ -136,8 +153,40 @@ export const StoryMetaSchema = z.object({
       guidedSceneSettingPrompt: z.string().optional(),
       guidedSuggestPrompt: z.string().optional(),
       disableThinking: z.boolean().default(false),
+      // erratanet provenance. Absent for purely local stories.
+      erratanet: z
+        .object({
+          // Where this story was installed from (a story pack), if any.
+          pack: z.string().optional(),
+          version: z.string().optional(),
+          // Where this story is published to as a whole story. Drives "sync".
+          publishedAs: z.object({ pack: z.string(), version: z.string() }).optional(),
+          // Fragment packs published from this story (e.g. a reusable "starter").
+          // Each remembers its fragment ids so it can be re-synced as a new version.
+          fragmentPacks: z
+            .array(
+              z.object({
+                pack: z.string(),
+                version: z.string(),
+                fragmentIds: z.array(z.string()).default([]),
+              }),
+            )
+            .optional(),
+          // Agent-config packs shared from this story. Each remembers which
+          // surfaces it bundled so it can be re-synced as a new version.
+          agentConfigs: z
+            .array(
+              z.object({
+                pack: z.string(),
+                version: z.string(),
+                includes: z.array(z.string()).default([]),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
     })
-    .default({ outputFormat: 'markdown', enabledPlugins: [], summarizationThreshold: 4, maxSteps: 10, modelOverrides: {}, generationMode: 'standard', disableLibrarianAutoAnalysis: false, autoApplyLibrarianSuggestions: false, disableLibrarianDirections: false, disableLibrarianSuggestions: false, contextOrderMode: 'simple', fragmentOrder: [], enabledBuiltinTools: [], contextCompact: { type: 'proseLimit', value: 10 }, summaryCompact: { maxCharacters: 12000, targetCharacters: 9000 }, enableHierarchicalSummary: false, disableThinking: false }),
+    .default({ outputFormat: 'markdown', enabledPlugins: [], summarizationThreshold: 4, maxSteps: 10, modelOverrides: {}, generationMode: 'standard', clarifyBeforeGenerate: false, prewriterReasoning: 'normal', disableLibrarianAutoAnalysis: false, autoApplyLibrarianSuggestions: false, disableLibrarianDirections: false, disableLibrarianSuggestions: false, contextOrderMode: 'simple', fragmentOrder: [], customFragmentTypes: [], enabledBuiltinTools: [], contextCompact: { type: 'proseLimit', value: 10 }, summaryCompact: { maxCharacters: 12000, targetCharacters: 9000 }, enableHierarchicalSummary: false, disableThinking: false }),
 })
 
 export type StoryMeta = z.infer<typeof StoryMetaSchema>

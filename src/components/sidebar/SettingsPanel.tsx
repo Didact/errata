@@ -1,15 +1,29 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type StoryMeta, type GlobalConfigSafe } from '@/lib/api'
-import { useTheme, useQuickSwitch, useCharacterMentions, useTimelineBar, useProseWidth, useUiFontSize, UI_FONT_SIZE_LABELS, useProseFontSize, PROSE_FONT_SIZE_LABELS, useFontPreferences, getActiveFont, FONT_CATALOGUE, loadFullFontCatalogue, useCustomCss, useProseColors, useWritingTransforms, type FontRole, type ProseWidth, type UiFontSize, type ProseFontSize } from '@/lib/theme'
-import { Settings2, ChevronRight, ExternalLink, Eye, EyeOff, Puzzle, RotateCcw, CircleHelp, Code, Wand2, Compass, ArrowLeft, Palette } from 'lucide-react'
+import { useTheme, useQuickSwitch, useCharacterMentions, useTimelineBar, useProseWidth, useUiFontSize, UI_FONT_SIZE_LABELS, useProseFontSize, PROSE_FONT_SIZE_LABELS, useFontPreferences, getActiveFont, FONT_CATALOGUE, loadFullFontCatalogue, useCustomCss, useWritingTransforms, useTransformContext, TRANSFORM_CONTEXT_LABELS, type TransformContext, type FontRole, type ProseWidth, type UiFontSize, type ProseFontSize } from '@/lib/theme'
+import { Settings2, ChevronRight, ExternalLink, Eye, EyeOff, Puzzle, RotateCcw, CircleHelp, Code } from 'lucide-react'
 import { useHelp } from '@/hooks/use-help'
 import { CustomCssPanel } from '@/components/settings/CustomCssPanel'
-import { ProseColorsPanel } from '@/components/settings/ProseColorsPanel'
-import { CustomTransformsPanel } from '@/components/settings/CustomTransformsPanel'
+import { TtsSettings } from '@/components/settings/TtsSettings'
+import { SharingPanel } from '@/components/settings/SharingPanel'
+import { ProseColorsControls } from '@/components/settings/ProseColorsPanel'
+import { CustomTransformsControls } from '@/components/settings/CustomTransformsPanel'
+import { DesktopUpdatesControls } from '@/components/settings/DesktopUpdatesPanel'
+import { AboutSection } from '@/components/settings/AboutPanel'
 import { ModelSelect } from '@/components/settings/ModelSelect'
 import { ProviderSelect } from '@/components/settings/ProviderSelect'
+import { getDesktopBridge, onDesktopBridgeReady } from '@/lib/desktop'
 import { resolveProvider, getInheritLabel } from '@/lib/model-role-helpers'
+import {
+  SettingsSection,
+  SectionHeading,
+  SettingsCard,
+  SettingRow,
+  Toggle,
+  SegmentedControl,
+  NumberField,
+} from '@/components/settings/primitives'
 
 interface SettingsPanelProps {
   storyId: string
@@ -21,73 +35,6 @@ interface SettingsPanelProps {
 }
 
 
-function ToggleSwitch({ on, onToggle, disabled, label }: { on: boolean; onToggle: () => void; disabled?: boolean; label?: string }) {
-  return (
-    <button
-      onClick={onToggle}
-      disabled={disabled}
-      className={`relative shrink-0 h-[18px] w-[32px] rounded-full transition-colors ${on ? 'bg-foreground' : 'bg-muted-foreground/20'
-        }`}
-      aria-label={label}
-    >
-      <span
-        className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-background transition-[left] duration-150 ${on ? 'left-[16px]' : 'left-[2px]'
-          }`}
-      />
-    </button>
-  )
-}
-
-function SegmentedControl<T extends string>({ value, options, onChange, disabled }: {
-  value: T
-  options: { value: T; label: string }[]
-  onChange: (value: T) => void
-  disabled?: boolean
-}) {
-  return (
-    <div className="flex h-[26px] rounded-md border border-border/40 overflow-hidden">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          disabled={disabled}
-          className={`px-2.5 text-[0.6875rem] font-medium transition-colors ${value === opt.value
-              ? 'bg-foreground text-background'
-              : 'bg-transparent text-muted-foreground hover:text-foreground/70'
-            }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function SettingRow({ label, description, helpTopic, children }: { label: string; description?: string; helpTopic?: string; children: React.ReactNode }) {
-  const { openHelp } = useHelp()
-  return (
-    <div className="flex items-center justify-between gap-3 px-3 py-2">
-      <div className="min-w-0">
-        <div className="flex items-center gap-1">
-          <p className="text-[0.75rem] font-medium text-foreground/80">{label}</p>
-          {helpTopic && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); openHelp(helpTopic) }}
-              className="text-muted-foreground hover:text-primary/60 transition-colors"
-              title="Learn more"
-            >
-              <CircleHelp className="size-3" />
-            </button>
-          )}
-        </div>
-        {description && <p className="text-[0.625rem] text-muted-foreground mt-0.5 leading-snug">{description}</p>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  )
-}
-
 function SettingsGroup({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-border/30 overflow-hidden">
@@ -98,28 +45,6 @@ function SettingsGroup({ title, description, children }: { title: string; descri
       <div className="divide-y divide-border/20">
         {children}
       </div>
-    </div>
-  )
-}
-
-function NumberStepper({ value, min, max, onChange, disabled, suffix, wide }: {
-  value: number; min: number; max: number; onChange: (v: number) => void; disabled?: boolean; suffix?: string; wide?: boolean
-}) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <input
-        type="number"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(e) => {
-          const v = parseInt(e.target.value, 10)
-          if (!isNaN(v) && v >= min && v <= max) onChange(v)
-        }}
-        className={`${wide ? 'w-20' : 'w-14'} h-[26px] px-2 text-[0.6875rem] font-mono text-center bg-background border border-border/40 rounded-md focus:border-foreground/20 focus:outline-none`}
-        disabled={disabled}
-      />
-      {suffix && <span className="text-[0.625rem] text-muted-foreground">{suffix}</span>}
     </div>
   )
 }
@@ -229,8 +154,16 @@ function LLMSection({ story, globalConfig, updateMutation, onManageProviders }: 
                     providerId={effectiveProviderId}
                     value={directModelId}
                     onChange={(mid) => {
+                      const current = overrides[role.key] ?? {}
                       updateMutation.mutate({
-                        modelOverrides: { ...overrides, [role.key]: { ...overrides[role.key], modelId: mid } },
+                        modelOverrides: {
+                          ...overrides,
+                          [role.key]: {
+                            ...current,
+                            providerId: mid ? (current.providerId ?? effectiveProviderId) : current.providerId,
+                            modelId: mid,
+                          },
+                        },
                       })
                     }}
                     disabled={updateMutation.isPending}
@@ -247,8 +180,9 @@ function LLMSection({ story, globalConfig, updateMutation, onManageProviders }: 
                     onChange={(e) => {
                       const val = e.target.value
                       const temp = val === '' ? null : parseFloat(val)
+                      const current = overrides[role.key] ?? {}
                       updateMutation.mutate({
-                        modelOverrides: { ...overrides, [role.key]: { ...overrides[role.key], temperature: temp } },
+                        modelOverrides: { ...overrides, [role.key]: { ...current, temperature: temp } },
                       })
                     }}
                     disabled={updateMutation.isPending}
@@ -289,9 +223,8 @@ Consider a mix of: advancing the main plot, exploring character relationships, i
 
 Respond with ONLY the JSON array, no markdown fences or other text.`
 
-function GuidedPromptsPanel({ story, onClose, onUpdate, isPending }: {
+function GuidedPromptsControls({ story, onUpdate, isPending }: {
   story: StoryMeta
-  onClose: () => void
   onUpdate: (data: { guidedContinuePrompt?: string; guidedSceneSettingPrompt?: string; guidedSuggestPrompt?: string }) => void
   isPending: boolean
 }) {
@@ -299,22 +232,22 @@ function GuidedPromptsPanel({ story, onClose, onUpdate, isPending }: {
   const [sceneSettingPrompt, setSceneSettingPrompt] = useState(story.settings.guidedSceneSettingPrompt ?? '')
   const [suggestPrompt, setSuggestPrompt] = useState(story.settings.guidedSuggestPrompt ?? '')
 
-  const save = (field: string, value: string) => {
-    onUpdate({ [field]: value || undefined })
+  useEffect(() => {
+    setContinuePrompt(story.settings.guidedContinuePrompt ?? '')
+    setSceneSettingPrompt(story.settings.guidedSceneSettingPrompt ?? '')
+    setSuggestPrompt(story.settings.guidedSuggestPrompt ?? '')
+  }, [
+    story.settings.guidedContinuePrompt,
+    story.settings.guidedSceneSettingPrompt,
+    story.settings.guidedSuggestPrompt,
+  ])
+
+  const save = (field: 'guidedContinuePrompt' | 'guidedSceneSettingPrompt' | 'guidedSuggestPrompt', value: string) => {
+    onUpdate({ [field]: value.trim() === '' ? '' : value })
   }
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border/20">
-        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
-          <ArrowLeft className="size-4" />
-        </button>
-        <div>
-          <h3 className="text-sm font-medium">Guided mode prompts</h3>
-          <p className="text-[0.625rem] text-muted-foreground">Customize the prompts used in guided writing mode</p>
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ scrollbarWidth: 'thin' }}>
+    <div className="space-y-4">
         <div>
           <label className="text-[0.6875rem] font-medium text-foreground/80 mb-1 block">Continue prompt</label>
           <p className="text-[0.625rem] text-muted-foreground mb-1.5 leading-snug">Used when clicking the "Continue" button</p>
@@ -359,8 +292,79 @@ function GuidedPromptsPanel({ story, onClose, onUpdate, isPending }: {
         <p className="text-[0.625rem] text-muted-foreground italic">
           Leave empty to use the default prompt. Changes are saved when you leave each field.
         </p>
-      </div>
     </div>
+  )
+}
+
+const DEFAULT_HUB = 'https://errata.tealios.com'
+
+function ErrataNetSection() {
+  const queryClient = useQueryClient()
+  const { data: config } = useQuery({
+    queryKey: ['erratanet-config'],
+    queryFn: () => api.erratanet.getConfig(),
+  })
+  const setConfig = useMutation({
+    mutationFn: (data: { enabled?: boolean; hubUrl?: string; introSeen?: boolean }) =>
+      api.erratanet.setConfig(data),
+    onSuccess: (cfg) => {
+      queryClient.setQueryData(['erratanet-config'], cfg)
+      queryClient.invalidateQueries({ queryKey: ['erratanet-account'] })
+    },
+  })
+
+  const enabled = config?.enabled ?? false
+
+  // Local draft for the endpoint so typing does not fire a save on every key.
+  const [endpoint, setEndpoint] = useState('')
+  useEffect(() => {
+    setEndpoint(config?.hubUrl ?? '')
+  }, [config?.hubUrl])
+
+  const saveEndpoint = () => {
+    const next = endpoint.trim().replace(/\/+$/, '')
+    setEndpoint(next)
+    if (next === (config?.hubUrl ?? '')) return
+    setConfig.mutate({ hubUrl: next })
+  }
+
+  return (
+    <>
+      <SectionHeading label="ErrataNet" />
+      <div className="space-y-3">
+        <SettingsCard>
+          <SettingRow
+            label="ErrataNet"
+            description="Browse, install, and publish community packs from a hub."
+          >
+            <Toggle
+              checked={enabled}
+              disabled={setConfig.isPending}
+              onChange={(next) => setConfig.mutate(next ? { enabled: true, introSeen: true } : { enabled: false })}
+              label="Toggle ErrataNet"
+            />
+          </SettingRow>
+        </SettingsCard>
+
+        <div className={`rounded-lg border border-border/30 p-3 ${enabled ? '' : 'pointer-events-none opacity-40'}`}>
+          <p className="text-[0.75rem] font-medium text-foreground/80">API endpoint</p>
+          <p className="mt-0.5 text-[0.625rem] leading-snug text-muted-foreground">
+            The hub Errata connects to for browsing and publishing packs.
+          </p>
+          <input
+            value={endpoint}
+            onChange={(e) => setEndpoint(e.target.value)}
+            onBlur={saveEndpoint}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+            placeholder={DEFAULT_HUB}
+            spellCheck={false}
+            autoComplete="off"
+            disabled={!enabled || setConfig.isPending}
+            className="mt-2 h-[28px] w-full rounded-md border border-border/40 bg-background px-2 font-mono text-[0.75rem] text-foreground focus:border-foreground/20 focus:outline-none disabled:opacity-60"
+          />
+        </div>
+      </div>
+    </>
   )
 }
 
@@ -401,11 +405,9 @@ export function SettingsPanel({
   }
 
   const [customCssPanelOpen, setCustomCssPanelOpen] = useState(false)
-  const [proseColorsPanelOpen, setProseColorsPanelOpen] = useState(false)
-  const [transformsPanelOpen, setTransformsPanelOpen] = useState(false)
-  const [guidedPromptsPanelOpen, setGuidedPromptsPanelOpen] = useState(false)
   const [writingTransforms] = useWritingTransforms()
   const enabledTransformCount = writingTransforms.filter(t => t.enabled).length
+  const [transformContext, setTransformContext] = useTransformContext()
   const { openHelp } = useHelp()
   const { theme, setTheme } = useTheme()
   const [quickSwitch, setQuickSwitch] = useQuickSwitch()
@@ -417,40 +419,24 @@ export function SettingsPanel({
   const [fontPrefs, setFont, resetFonts] = useFontPreferences()
   const hasCustomFonts = Object.keys(fontPrefs).length > 0
   const [, customCssEnabled, , setCustomCssEnabled] = useCustomCss()
-  const [proseColors] = useProseColors()
-  const hasProseColors = Object.values(proseColors).some(Boolean)
+  const [hasDesktopBridge, setHasDesktopBridge] = useState(() => getDesktopBridge() !== null)
+
+  useEffect(() => {
+    return onDesktopBridgeReady(() => setHasDesktopBridge(true))
+  }, [])
 
   const summaryCompact = story.settings.summaryCompact ?? { maxCharacters: 12000, targetCharacters: 9000 }
-
-  if (proseColorsPanelOpen) {
-    return <ProseColorsPanel onClose={() => setProseColorsPanelOpen(false)} />
-  }
 
   if (customCssPanelOpen) {
     return <CustomCssPanel onClose={() => setCustomCssPanelOpen(false)} />
   }
 
-  if (transformsPanelOpen) {
-    return <CustomTransformsPanel onClose={() => setTransformsPanelOpen(false)} />
-  }
-
-  if (guidedPromptsPanelOpen) {
-    return (
-      <GuidedPromptsPanel
-        story={story}
-        onClose={() => setGuidedPromptsPanelOpen(false)}
-        onUpdate={(data) => updateMutation.mutate(data)}
-        isPending={updateMutation.isPending}
-      />
-    )
-  }
-
   return (
     <div className="p-4 space-y-4" data-component-id="settings-panel-root">
       {/* Appearance */}
-      <div>
-        <label className="text-[0.625rem] text-muted-foreground uppercase tracking-wider mb-2 block">Appearance</label>
-        <div className="rounded-lg border border-border/30 divide-y divide-border/20">
+      <SettingsSection id="set-appearance" label="Appearance" group="Interface">
+        <SectionHeading label="Appearance" />
+        <SettingsCard>
           <SettingRow label="Theme">
             <SegmentedControl
               value={theme}
@@ -476,13 +462,13 @@ export function SettingsPanel({
             />
           </SettingRow>
           <SettingRow label="Quick switch" description="Show chevrons to swap between variations">
-            <ToggleSwitch on={quickSwitch} onToggle={() => setQuickSwitch(!quickSwitch)} label="Toggle quick switch" />
+            <Toggle checked={quickSwitch} onChange={setQuickSwitch} label="Toggle quick switch" />
           </SettingRow>
           <SettingRow label="Character mentions" description="Highlight character names in prose">
-            <ToggleSwitch on={characterMentions} onToggle={() => setCharacterMentions(!characterMentions)} label="Toggle character mentions" />
+            <Toggle checked={characterMentions} onChange={setCharacterMentions} label="Toggle character mentions" />
           </SettingRow>
           <SettingRow label="Timeline bar" description="Show timeline switcher above prose">
-            <ToggleSwitch on={timelineBar} onToggle={() => setTimelineBar(!timelineBar)} label="Toggle timeline bar" />
+            <Toggle checked={timelineBar} onChange={setTimelineBar} label="Toggle timeline bar" />
           </SettingRow>
           <SettingRow label="Prose width" description="Reading column width">
             <SegmentedControl<ProseWidth>
@@ -509,24 +495,8 @@ export function SettingsPanel({
               onChange={setProseFontSize}
             />
           </SettingRow>
-          <button
-            type="button"
-            onClick={() => setProseColorsPanelOpen(true)}
-            className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-accent/20 transition-colors"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <Palette className="size-3 text-muted-foreground" />
-                <p className="text-[0.75rem] font-medium text-foreground/80">Prose colors</p>
-              </div>
-              <p className="text-[0.625rem] text-muted-foreground mt-0.5 leading-snug">
-                {hasProseColors ? 'Custom colors active' : 'Customize dialogue, narration & emphasis colors'}
-              </p>
-            </div>
-            <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
-          </button>
           <SettingRow label="Custom CSS" description="Apply your own styles globally">
-            <ToggleSwitch on={customCssEnabled} onToggle={() => setCustomCssEnabled(!customCssEnabled)} label="Toggle custom CSS" />
+            <Toggle checked={customCssEnabled} onChange={setCustomCssEnabled} label="Toggle custom CSS" />
           </SettingRow>
           {customCssEnabled && (
             <button
@@ -541,14 +511,15 @@ export function SettingsPanel({
               <ChevronRight className="size-3" />
             </button>
           )}
-        </div>
-      </div>
+        </SettingsCard>
+        <ProseColorsControls />
+      </SettingsSection>
 
       {/* Typography */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-[0.625rem] text-muted-foreground uppercase tracking-wider">Typography</label>
-          {hasCustomFonts && (
+      <SettingsSection id="set-typography" label="Typography" group="Interface">
+        <SectionHeading
+          label="Typography"
+          action={hasCustomFonts && (
             <button
               onClick={resetFonts}
               className="flex items-center gap-1 text-[0.625rem] text-muted-foreground hover:text-foreground/60 transition-colors"
@@ -557,8 +528,8 @@ export function SettingsPanel({
               Reset
             </button>
           )}
-        </div>
-        <div className="rounded-lg border border-border/30 divide-y divide-border/20">
+        />
+        <SettingsCard>
           <FontPicker
             role="display"
             label="Display"
@@ -587,61 +558,25 @@ export function SettingsPanel({
             activeFont={getActiveFont('mono', fontPrefs)}
             onSelect={(name) => setFont('mono', name)}
           />
-        </div>
-      </div>
+        </SettingsCard>
+      </SettingsSection>
 
-      {/* Writing */}
-      <div>
-        <label className="text-[0.625rem] text-muted-foreground uppercase tracking-wider mb-2 block">Writing</label>
-        <div className="rounded-lg border border-border/30 divide-y divide-border/20">
-          <button
-            type="button"
-            onClick={() => setTransformsPanelOpen(true)}
-            className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-accent/20 transition-colors"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <Wand2 className="size-3 text-muted-foreground" />
-                <p className="text-[0.75rem] font-medium text-foreground/80">Selection transforms</p>
-              </div>
-              <p className="text-[0.625rem] text-muted-foreground mt-0.5 leading-snug">
-                {enabledTransformCount} custom transform{enabledTransformCount !== 1 ? 's' : ''} active
-              </p>
-            </div>
-            <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setGuidedPromptsPanelOpen(true)}
-            className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-accent/20 transition-colors"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <Compass className="size-3 text-muted-foreground" />
-                <p className="text-[0.75rem] font-medium text-foreground/80">Guided mode prompts</p>
-              </div>
-              <p className="text-[0.625rem] text-muted-foreground mt-0.5 leading-snug">
-                {story.settings.guidedContinuePrompt || story.settings.guidedSceneSettingPrompt || story.settings.guidedSuggestPrompt ? 'Custom prompts configured' : 'Using default prompts'}
-              </p>
-            </div>
-            <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
-          </button>
-        </div>
-      </div>
+      {/* Read aloud (TTS) */}
+      <SettingsSection id="set-read-aloud" label="Read aloud" group="Interface"><TtsSettings /></SettingsSection>
+
+      {/* LLM */}
+      <SettingsSection id="set-providers" label="Providers" group="Writing">
+        <LLMSection
+          story={story}
+          globalConfig={globalConfig ?? null}
+          updateMutation={updateMutation}
+          onManageProviders={onManageProviders}
+        />
+      </SettingsSection>
 
       {/* Generation */}
-      <div>
-        <div className="flex items-center gap-1.5 mb-2">
-          <label className="text-[0.625rem] text-muted-foreground uppercase tracking-wider">Generation</label>
-          <button
-            type="button"
-            onClick={() => openHelp('generation#overview')}
-            className="text-muted-foreground hover:text-primary/60 transition-colors"
-            title="How generation works"
-          >
-            <CircleHelp className="size-3" />
-          </button>
-        </div>
+      <SettingsSection id="set-generation" label="Generation" group="Writing">
+        <SectionHeading label="Generation" helpTopic="generation#overview" />
         <div className="space-y-3">
           <SettingsGroup title="Workflow" description="How prose generation runs and what the model is allowed to do.">
             <SettingRow label="Generation mode" description="How prose generation is handled">
@@ -655,6 +590,30 @@ export function SettingsPanel({
                 disabled={updateMutation.isPending}
               />
             </SettingRow>
+            {(story.settings.generationMode ?? 'standard') === 'prewriter' && (
+              <>
+                <SettingRow label="Prewriter reasoning" description="How much the prewriter deliberates. Short favors speed; Extensive favors depth.">
+                  <SegmentedControl
+                    value={(story.settings.prewriterReasoning ?? 'normal') as 'short' | 'normal' | 'extensive'}
+                    options={[
+                      { value: 'short' as const, label: 'Short' },
+                      { value: 'normal' as const, label: 'Normal' },
+                      { value: 'extensive' as const, label: 'Extensive' },
+                    ]}
+                    onChange={(v) => updateMutation.mutate({ prewriterReasoning: v })}
+                    disabled={updateMutation.isPending}
+                  />
+                </SettingRow>
+                <SettingRow label="Clarify before writing" description="Let the prewriter ask you questions when your direction is ambiguous, before it writes.">
+                  <Toggle
+                    checked={story.settings.clarifyBeforeGenerate ?? false}
+                    onChange={(next) => updateMutation.mutate({ clarifyBeforeGenerate: next })}
+                    disabled={updateMutation.isPending}
+                    label="Toggle clarify before writing"
+                  />
+                </SettingRow>
+              </>
+            )}
             <SettingRow label="Output format" helpTopic="generation#output-format">
               <SegmentedControl
                 value={story.settings.outputFormat}
@@ -667,7 +626,7 @@ export function SettingsPanel({
               />
             </SettingRow>
             <SettingRow label="Max steps" description="Tool-use rounds per generation" helpTopic="generation#max-steps">
-              <NumberStepper
+              <NumberField
                 value={story.settings.maxSteps ?? 10}
                 min={1}
                 max={50}
@@ -676,9 +635,9 @@ export function SettingsPanel({
               />
             </SettingRow>
             <SettingRow label="Disable thinking" description="Suppress extended thinking / reasoning mode on models that support it">
-              <ToggleSwitch
-                on={story.settings.disableThinking ?? false}
-                onToggle={() => updateMutation.mutate({ disableThinking: !(story.settings.disableThinking ?? false) })}
+              <Toggle
+                checked={story.settings.disableThinking ?? false}
+                onChange={(next) => updateMutation.mutate({ disableThinking: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle disable thinking"
               />
@@ -724,13 +683,13 @@ export function SettingsPanel({
                   }}
                   disabled={updateMutation.isPending}
                 />
-                <NumberStepper
+                <NumberField
                   value={story.settings.contextCompact?.value ?? 10}
                   min={(story.settings.contextCompact?.type ?? 'proseLimit') === 'proseLimit' ? 1 : (story.settings.contextCompact?.type ?? 'proseLimit') === 'maxTokens' ? 100 : 500}
                   max={(story.settings.contextCompact?.type ?? 'proseLimit') === 'proseLimit' ? 100 : (story.settings.contextCompact?.type ?? 'proseLimit') === 'maxTokens' ? 100000 : 500000}
                   onChange={(v) => updateMutation.mutate({ contextCompact: { type: story.settings.contextCompact?.type ?? 'proseLimit', value: v } })}
                   disabled={updateMutation.isPending}
-                  wide={(story.settings.contextCompact?.type ?? 'proseLimit') !== 'proseLimit'}
+                  className={(story.settings.contextCompact?.type ?? 'proseLimit') !== 'proseLimit' ? 'w-20' : undefined}
                 />
               </div>
             </div>
@@ -738,7 +697,7 @@ export function SettingsPanel({
 
           <SettingsGroup title="Memory" description="How story state is summarized and carried forward over time.">
             <SettingRow label="Summarization" description="Positions back before summarizing" helpTopic="generation#summarization">
-              <NumberStepper
+              <NumberField
                 value={story.settings.summarizationThreshold ?? 4}
                 min={0}
                 max={20}
@@ -753,7 +712,7 @@ export function SettingsPanel({
               <div className="mt-2.5 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[0.6875rem] text-muted-foreground">Max characters</span>
-                  <NumberStepper
+                  <NumberField
                     value={summaryCompact.maxCharacters}
                     min={100}
                     max={100000}
@@ -767,13 +726,13 @@ export function SettingsPanel({
                       })
                     }}
                     disabled={updateMutation.isPending}
-                    wide
+                    className="w-20"
                   />
                 </div>
 
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[0.6875rem] text-muted-foreground">Target characters</span>
-                  <NumberStepper
+                  <NumberField
                     value={summaryCompact.targetCharacters}
                     min={100}
                     max={summaryCompact.maxCharacters}
@@ -786,7 +745,7 @@ export function SettingsPanel({
                       })
                     }}
                     disabled={updateMutation.isPending}
-                    wide
+                    className="w-20"
                   />
                 </div>
               </div>
@@ -796,9 +755,9 @@ export function SettingsPanel({
               description="Include chapter marker summaries with rolling story summary"
               helpTopic="generation#hierarchical-summaries"
             >
-              <ToggleSwitch
-                on={story.settings.enableHierarchicalSummary ?? false}
-                onToggle={() => updateMutation.mutate({ enableHierarchicalSummary: !(story.settings.enableHierarchicalSummary ?? false) })}
+              <Toggle
+                checked={story.settings.enableHierarchicalSummary ?? false}
+                onChange={(next) => updateMutation.mutate({ enableHierarchicalSummary: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle hierarchical summaries"
               />
@@ -807,62 +766,98 @@ export function SettingsPanel({
 
           <SettingsGroup title="Librarian" description="What happens after prose is generated and the librarian follows up.">
             <SettingRow label="Disable auto analysis" description="Do not run the librarian automatically after prose generation">
-              <ToggleSwitch
-                on={story.settings.disableLibrarianAutoAnalysis ?? false}
-                onToggle={() => updateMutation.mutate({ disableLibrarianAutoAnalysis: !(story.settings.disableLibrarianAutoAnalysis ?? false) })}
+              <Toggle
+                checked={story.settings.disableLibrarianAutoAnalysis ?? false}
+                onChange={(next) => updateMutation.mutate({ disableLibrarianAutoAnalysis: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle disable auto analysis"
               />
             </SettingRow>
             <SettingRow label="Auto-apply suggestions" description="Librarian auto creates and updates suggested fragments" helpTopic="librarian#auto-suggestions">
-              <ToggleSwitch
-                on={story.settings.autoApplyLibrarianSuggestions ?? false}
-                onToggle={() => updateMutation.mutate({ autoApplyLibrarianSuggestions: !(story.settings.autoApplyLibrarianSuggestions ?? false) })}
+              <Toggle
+                checked={story.settings.autoApplyLibrarianSuggestions ?? false}
+                onChange={(next) => updateMutation.mutate({ autoApplyLibrarianSuggestions: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle auto-apply suggestions"
               />
             </SettingRow>
             <SettingRow label="Disable directions" description="Skip story direction suggestions during analysis">
-              <ToggleSwitch
-                on={story.settings.disableLibrarianDirections ?? false}
-                onToggle={() => updateMutation.mutate({ disableLibrarianDirections: !(story.settings.disableLibrarianDirections ?? false) })}
+              <Toggle
+                checked={story.settings.disableLibrarianDirections ?? false}
+                onChange={(next) => updateMutation.mutate({ disableLibrarianDirections: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle disable directions"
               />
             </SettingRow>
             <SettingRow label="Disable suggestions" description="Skip fragment create/update suggestions during analysis">
-              <ToggleSwitch
-                on={story.settings.disableLibrarianSuggestions ?? false}
-                onToggle={() => updateMutation.mutate({ disableLibrarianSuggestions: !(story.settings.disableLibrarianSuggestions ?? false) })}
+              <Toggle
+                checked={story.settings.disableLibrarianSuggestions ?? false}
+                onChange={(next) => updateMutation.mutate({ disableLibrarianSuggestions: next })}
                 disabled={updateMutation.isPending}
                 label="Toggle disable suggestions"
               />
             </SettingRow>
           </SettingsGroup>
         </div>
-      </div>
+      </SettingsSection>
 
-      {/* LLM */}
-      <LLMSection
-        story={story}
-        globalConfig={globalConfig ?? null}
-        updateMutation={updateMutation}
-        onManageProviders={onManageProviders}
-      />
+      {/* Authoring (transforms + guided prompts) */}
+      <SettingsSection id="set-authoring" label="Authoring" group="Writing">
+        <SectionHeading label="Authoring" />
+        <div className="space-y-6">
+          <div className="space-y-2.5">
+            <div>
+              <p className="text-[0.625rem] uppercase tracking-[0.14em] text-muted-foreground">
+                Selection transforms{enabledTransformCount > 0 ? ` · ${enabledTransformCount} active` : ''}
+              </p>
+              <p className="text-[0.6875rem] text-muted-foreground mt-0.5 leading-snug">
+                Quick rewrites in the floating toolbar when you select text. Drag to reorder, toggle to show or hide.
+              </p>
+            </div>
+            <SettingsCard>
+              <SettingRow label="Surrounding context" description="How much of the passage around your selection a transform can read.">
+                <SegmentedControl
+                  value={transformContext}
+                  options={(['tight', 'wide', 'passage'] as TransformContext[]).map((v) => ({ value: v, label: TRANSFORM_CONTEXT_LABELS[v] }))}
+                  onChange={setTransformContext}
+                />
+              </SettingRow>
+            </SettingsCard>
+            <CustomTransformsControls />
+          </div>
+
+          <div className="space-y-2.5">
+            <div>
+              <p className="text-[0.625rem] uppercase tracking-[0.14em] text-muted-foreground">Guided mode prompts</p>
+              <p className="text-[0.6875rem] text-muted-foreground mt-0.5 leading-snug">
+                The prompts behind the guided writing buttons. Leave a field empty to use its default.
+              </p>
+            </div>
+            <GuidedPromptsControls story={story} onUpdate={(data) => updateMutation.mutate(data)} isPending={updateMutation.isPending} />
+          </div>
+        </div>
+      </SettingsSection>
+
+      {/* Remote access (auth + LAN + tunnel) */}
+      <SettingsSection id="set-remote" label="Remote" group="System">
+        <SharingPanel />
+      </SettingsSection>
+
+      {/* ErrataNet (pack hub: enable + API endpoint) */}
+      <SettingsSection id="set-erratanet" label="ErrataNet" group="System">
+        <ErrataNetSection />
+      </SettingsSection>
+
+      {/* Updates */}
+      {hasDesktopBridge && (
+        <SettingsSection id="set-updates" label="Updates" group="System">
+          <DesktopUpdatesControls />
+        </SettingsSection>
+      )}
 
       {/* Plugins */}
-      <div>
-        <div className="flex items-center gap-1.5 mb-3">
-          <label className="text-[0.625rem] text-muted-foreground uppercase tracking-wider">Plugins</label>
-          <button
-            type="button"
-            onClick={() => openHelp('settings#plugins')}
-            className="text-muted-foreground hover:text-primary/60 transition-colors"
-            title="About plugins"
-          >
-            <CircleHelp className="size-3" />
-          </button>
-        </div>
+      <SettingsSection id="set-plugins" label="Plugins" group="System">
+        <SectionHeading label="Plugins" helpTopic="settings#plugins" className="mb-3" />
         {plugins && plugins.length > 0 ? (
           <div className="space-y-2">
             {plugins.map((plugin) => {
@@ -935,24 +930,12 @@ export function SettingsPanel({
             <p className="text-[0.6875rem] text-muted-foreground">No plugins available</p>
           </div>
         )}
-      </div>
+      </SettingsSection>
 
-      {/* Attribution */}
-      <div className="pt-4 mt-2 border-t border-border/20">
-        <p className="text-[0.625rem] text-muted-foreground text-center leading-relaxed">
-          Errata v{__BUILD_VERSION__}
-          <br />
-          Built by{' '}
-          <a
-            href="https://github.com/tealios"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline hover:text-muted-foreground transition-colors"
-          >
-            Tealios
-          </a>
-        </p>
-      </div>
+      {/* About: version, links (docs, Discord, GitHub, releases), attribution + desktop updates */}
+      <SettingsSection id="set-about" label="About" group="System">
+        <AboutSection />
+      </SettingsSection>
     </div>
   )
 }

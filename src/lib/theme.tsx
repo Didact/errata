@@ -145,6 +145,49 @@ export function useProseWidth(): [ProseWidth, (v: ProseWidth) => void] {
   return [value, set]
 }
 
+// --- Selection-transform surrounding context ---
+// How much of the current prose fragment around the selection a transform can
+// read. 'passage' is the whole fragment (clamped to its length at apply time).
+export type TransformContext = 'tight' | 'wide' | 'passage'
+
+export const TRANSFORM_CONTEXT_CHARS: Record<TransformContext, number> = {
+  tight: 240,
+  wide: 1200,
+  passage: Number.MAX_SAFE_INTEGER,
+}
+
+export const TRANSFORM_CONTEXT_LABELS: Record<TransformContext, string> = {
+  tight: 'Nearby',
+  wide: 'Wider',
+  passage: 'Whole passage',
+}
+
+const TRANSFORM_CONTEXT_KEY = 'errata-transform-context'
+const TRANSFORM_CONTEXT_EVENT = 'errata-transform-context-change'
+
+export function useTransformContext(): [TransformContext, (v: TransformContext) => void] {
+  const [value, setValue] = useState<TransformContext>(() => {
+    if (typeof window === 'undefined') return 'tight'
+    const stored = localStorage.getItem(TRANSFORM_CONTEXT_KEY)
+    if (stored && stored in TRANSFORM_CONTEXT_CHARS) return stored as TransformContext
+    return 'tight'
+  })
+
+  useEffect(() => {
+    const handler = (e: Event) => setValue((e as CustomEvent<TransformContext>).detail)
+    window.addEventListener(TRANSFORM_CONTEXT_EVENT, handler)
+    return () => window.removeEventListener(TRANSFORM_CONTEXT_EVENT, handler)
+  }, [])
+
+  const set = useCallback((v: TransformContext) => {
+    setValue(v)
+    localStorage.setItem(TRANSFORM_CONTEXT_KEY, v)
+    window.dispatchEvent(new CustomEvent(TRANSFORM_CONTEXT_EVENT, { detail: v }))
+  }, [])
+
+  return [value, set]
+}
+
 // --- UI font size preference (root scaling) ---
 
 export type UiFontSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl'

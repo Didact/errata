@@ -6,6 +6,7 @@ import { compileAgentContext } from '../agents/compile-agent-context'
 import { getFragmentsByTag } from '../fragments/associations'
 import { instructionRegistry } from '../instructions'
 import { reportUsage } from '../llm/token-tracker'
+import { normalizeTokenUsage } from '../llm/usage-normalizer'
 import { createLogger } from '../logging'
 import type { AgentBlockContext } from '../agents/agent-block-context'
 
@@ -112,11 +113,9 @@ export async function suggestDirections(
   // Track token usage
   try {
     const rawUsage = await result.totalUsage
-    if (rawUsage && typeof rawUsage.inputTokens === 'number') {
-      reportUsage(dataDir, storyId, 'directions.suggest', {
-        inputTokens: rawUsage.inputTokens,
-        outputTokens: rawUsage.outputTokens ?? 0,
-      }, modelId)
+    const usage = normalizeTokenUsage(rawUsage)
+    if (usage) {
+      reportUsage(dataDir, storyId, 'directions.suggest', usage, modelId)
     }
   } catch {
     // Some providers may not report usage

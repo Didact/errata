@@ -1,13 +1,13 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ProviderConfigSafe } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Plus, Trash2, Star, Pencil, RefreshCw, Loader2, X, ArrowLeft, Minus, Zap, Copy } from 'lucide-react'
+import { Plus, Trash2, Star, Pencil, RefreshCw, Loader2, X, ArrowLeft, Minus, Zap, Copy, KeyRound } from 'lucide-react'
 import { EmptyHint, Hint } from '@/components/ui/prose-text'
 
 const PRESETS = {
-  deepseek: { name: 'DeepSeek', baseURL: 'https://api.deepseek.com', defaultModel: 'deepseek-chat' },
+  deepseek: { name: 'DeepSeek', baseURL: 'https://api.deepseek.com', defaultModel: 'deepseek-v4-flash', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
   openai: { name: 'OpenAI', baseURL: 'https://api.openai.com/v1', defaultModel: 'gpt-5.2' },
   anthropic: { name: 'Anthropic', baseURL: 'https://api.anthropic.com/v1', defaultModel: 'claude-opus-4-6' },
   kimi: { name: 'Kimi', baseURL: 'https://api.moonshot.ai/v1', defaultModel: 'kimi-k2.5' },
@@ -29,7 +29,9 @@ interface FormState {
   temperature: string // stored as string for input; '' means unset
 }
 
-const emptyForm: FormState = { preset: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com', apiKey: '', defaultModel: 'deepseek-chat', customHeaders: [], temperature: '' }
+type ModelOption = { id: string; owned_by?: string; isFree?: boolean }
+
+const emptyForm: FormState = { preset: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com', apiKey: '', defaultModel: 'deepseek-v4-flash', customHeaders: [], temperature: '' }
 
 /**
  * Compact provider list for the settings sidebar.
@@ -73,12 +75,14 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<FormState | null>(null)
-  const [fetchedModels, setFetchedModels] = useState<Array<{ id: string; owned_by?: string }>>([])
+  const [fetchedModels, setFetchedModels] = useState<ModelOption[]>([])
   const [fetchingModels, setFetchingModels] = useState(false)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [useCustomModel, setUseCustomModel] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; reply?: string; error?: string } | null>(null)
+  const [oauthStatus, setOauthStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const [oauthStarting, setOauthStarting] = useState(false)
 
   const { data: config } = useQuery({
     queryKey: ['global-config'],
@@ -87,6 +91,15 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['global-config'] })
 
+  const closeForm = useCallback(() => {
+    setEditingId(null)
+    setForm(null)
+    setFetchedModels([])
+    setFetchError(null)
+    setUseCustomModel(false)
+    setTestResult(null)
+  }, [])
+
   const addMutation = useMutation({
     mutationFn: (data: { name: string; preset?: string; baseURL: string; apiKey: string; defaultModel: string; customHeaders?: Record<string, string>; temperature?: number }) =>
       api.config.addProvider(data),
@@ -94,7 +107,7 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name?: string; baseURL?: string; apiKey?: string; defaultModel?: string; customHeaders?: Record<string, string> } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name?: string; baseURL?: string; apiKey?: string; defaultModel?: string; customHeaders?: Record<string, string>; temperature?: number } }) =>
       api.config.updateProvider(id, data),
     onSuccess: () => { invalidate(); closeForm() },
   })
@@ -109,21 +122,37 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
     onSuccess: invalidate,
   })
 
-  const closeForm = () => {
-    setEditingId(null)
-    setForm(null)
-    setFetchedModels([])
-    setFetchError(null)
-    setUseCustomModel(false)
-    setTestResult(null)
-  }
-
   const openAdd = () => {
     setEditingId(null)
     setForm({ ...emptyForm })
     setFetchedModels([])
     setFetchError(null)
     setUseCustomModel(false)
+    setOauthStatus(null)
+  }
+
+  const connectOpenRouter = async () => {
+    setOauthStarting(true)
+    setOauthStatus(null)
+    try {
+      const result = await api.config.startOpenRouterOAuth()
+      window.open(result.authUrl, '_blank', 'noopener,noreferrer')
+      setOauthStatus({ type: 'success', message: 'Authorize OpenRouter in the new window. When it says connected, return here.' })
+
+      let attempts = 0
+      const poll = window.setInterval(async () => {
+        attempts += 1
+        await invalidate()
+        const latest = queryClient.getQueryData<{ providers?: Array<{ preset?: string; baseURL?: string }> }>(['global-config'])
+        if (latest?.providers?.some((p) => p.preset === 'openrouter' || p.baseURL?.includes('openrouter.ai')) || attempts >= 30) {
+          window.clearInterval(poll)
+        }
+      }, 2000)
+    } catch (err) {
+      setOauthStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to start OpenRouter sign-in.' })
+    } finally {
+      setOauthStarting(false)
+    }
   }
 
   const duplicateMutation = useMutation({
@@ -227,7 +256,14 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
     const parsedTemp = form.temperature !== '' ? parseFloat(form.temperature) : undefined
     const temperature = parsedTemp != null && !isNaN(parsedTemp) ? parsedTemp : undefined
     if (editingId) {
-      const data: Record<string, unknown> = { name: form.name, baseURL: form.baseURL, defaultModel: form.defaultModel, customHeaders: headersRecord, temperature }
+      const data: {
+        name: string
+        baseURL: string
+        defaultModel: string
+        customHeaders: Record<string, string>
+        temperature?: number
+        apiKey?: string
+      } = { name: form.name, baseURL: form.baseURL, defaultModel: form.defaultModel, customHeaders: headersRecord, temperature }
       if (form.apiKey) data.apiKey = form.apiKey
       updateMutation.mutate({ id: editingId, data })
     } else {
@@ -277,6 +313,26 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
         /* ─── Add / Edit Form ─── */
         <ScrollArea className="flex-1" data-component-id="provider-form-scroll">
           <div className="max-w-2xl mx-auto p-6 space-y-5">
+            {!editingId && (
+              <>
+                <div className="rounded-md border border-border/30 bg-accent/10 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button type="button" size="sm" className="gap-1.5" onClick={connectOpenRouter} disabled={oauthStarting}>
+                      {oauthStarting ? <Loader2 className="size-3.5 animate-spin" /> : <KeyRound className="size-3.5" />}
+                      Connect OpenRouter
+                    </Button>
+                  </div>
+                  {oauthStatus && (
+                    <p className={`mt-2 text-[0.6875rem] ${oauthStatus.type === 'success' ? 'text-emerald-500' : 'text-destructive'}`}>
+                      {oauthStatus.message}
+                    </p>
+                  )}
+                </div>
+
+                <div className="border-t border-border/40" />
+              </>
+            )}
+
             {/* Preset selector (only for new providers) */}
             {!editingId && (
               <div>
@@ -300,7 +356,7 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
             )}
 
             {/* Two-column layout for name + base URL */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className={labelClass}>Name</label>
                 <input
@@ -404,7 +460,7 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
                     )}
                     {fetchedModels.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id}{m.owned_by ? ` (${m.owned_by})` : ''}
+                        {m.id}{m.isFree ? ' (free)' : m.owned_by ? ` (${m.owned_by})` : ''}
                       </option>
                     ))}
                   </select>
@@ -413,7 +469,7 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
                     value={form.defaultModel}
                     onChange={(e) => setForm({ ...form, defaultModel: e.target.value })}
                     className={inputClass + ' flex-1'}
-                    placeholder="e.g. deepseek-chat"
+                    placeholder="e.g. deepseek-v4-flash"
                   />
                 )}
                 <Button
@@ -428,6 +484,24 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
                   Fetch Models
                 </Button>
               </div>
+              {(() => {
+                const suggested = (PRESETS[form.preset as keyof typeof PRESETS] as { models?: readonly string[] } | undefined)?.models ?? []
+                return suggested.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <span className="text-[0.625rem] uppercase tracking-wider text-muted-foreground mr-0.5">Suggested</span>
+                    {suggested.map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setForm({ ...form, defaultModel: m })}
+                        className={`px-2 py-0.5 rounded-full text-[0.6875rem] border transition-colors ${form.defaultModel === m ? 'border-primary/40 bg-primary/10 text-foreground' : 'border-border/50 text-muted-foreground hover:text-foreground/80 hover:bg-accent/40'}`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                ) : null
+              })()}
               {fetchedModels.length > 0 && (
                 <button
                   type="button"
@@ -594,7 +668,7 @@ export function ProviderPanel({ onClose }: { onClose: () => void }) {
  * Used by SettingsPanel for the model override selector.
  */
 export function useModelFetcher() {
-  const [models, setModels] = useState<Array<{ id: string; owned_by?: string }>>([])
+  const [models, setModels] = useState<ModelOption[]>([])
   const [fetching, setFetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

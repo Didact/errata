@@ -25,7 +25,9 @@ import { registry } from '../fragments/registry'
 import { triggerLibrarian } from '../librarian/scheduler'
 import { clearAnalysisIndexEntry } from '../librarian/storage'
 import { createLogger } from '../logging'
+import { installFragmentBundle } from '../erratanet/pack-install'
 import type { Fragment } from '../fragments/schema'
+import type { FragmentBundleData } from '@/lib/fragment-clipboard'
 
 function hasMaterialProseChange(before: Fragment, after: Fragment): boolean {
   return before.name !== after.name
@@ -82,6 +84,40 @@ export function fragmentRoutes(dataDir: string) {
         id: t.Optional(t.String()),
         tags: t.Optional(t.Array(t.String())),
         meta: t.Optional(t.Record(t.String(), t.Unknown())),
+      }),
+    })
+
+    // Ref-aware batch import of a fragment bundle. Pre-allocates ids so
+    // cross-fragment refs survive (fixes the per-entry ref-loss bug). Trust:
+    // refuses any bundle carrying blockConfig or agentBlockConfigs.
+    .post('/stories/:storyId/fragments/import-bundle', async ({ params, body, set }) => {
+      const story = await getStory(dataDir, params.storyId)
+      if (!story) {
+        set.status = 404
+        return { error: 'Story not found' }
+      }
+      const bundle = body.bundle as unknown as FragmentBundleData
+      if (bundle?._errata !== 'fragment-bundle' || !Array.isArray(bundle.fragments) || bundle.fragments.length === 0) {
+        set.status = 422
+        return { error: 'Invalid fragment bundle' }
+      }
+      if (bundle.blockConfig || bundle.agentBlockConfigs) {
+        set.status = 422
+        return { error: 'Refusing bundle: block configuration is not allowed' }
+      }
+      const fragments = await installFragmentBundle(
+        dataDir,
+        params.storyId,
+        bundle,
+        { pack: body.pack ?? 'local', version: body.version ?? '0.0.0' },
+      )
+      return { fragments, count: fragments.length }
+    }, {
+      detail: { summary: 'Batch import a fragment bundle (ref-aware)' },
+      body: t.Object({
+        bundle: t.Record(t.String(), t.Unknown()),
+        pack: t.Optional(t.String()),
+        version: t.Optional(t.String()),
       }),
     })
 
@@ -391,12 +427,35 @@ export function fragmentRoutes(dataDir: string) {
     })
 
     // --- Fragment types ---
-    .get('/stories/:storyId/fragment-types', () => {
-      return registry.listTypes().map((t) => ({
+    .get('/stories/:storyId/fragment-types', async ({ params, set }) => {
+      const story = await getStory(dataDir, params.storyId)
+      if (!story) {
+        set.status = 404
+        return { error: 'Story not found' }
+      }
+      const customTypes = story.settings.customFragmentTypes ?? []
+      return [
+        ...registry.listTypes().map((t) => ({
         type: t.type,
         prefix: t.prefix,
         stickyByDefault: t.stickyByDefault,
-      }))
+        name: t.type,
+        description: '',
+        icon: 'Hash',
+        custom: false,
+        showInSidebar: !t.hiddenFromList,
+        })),
+        ...customTypes.map((t) => ({
+          type: t.type,
+          prefix: t.type.slice(0, 4).toLowerCase(),
+          stickyByDefault: false,
+          name: t.name,
+          description: t.description,
+          icon: t.icon,
+          custom: true,
+          showInSidebar: t.showInSidebar,
+        })),
+      ]
     }, { detail: { summary: 'List available fragment types' } })
 
     // --- Fragment Revert (legacy + versioned) ---

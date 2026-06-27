@@ -91,7 +91,7 @@ export function HelpPanel() {
         className={`fixed z-50 flex flex-col bg-background border-r border-border/40 shadow-2xl shadow-foreground/5 ${
           isMobile
             ? `inset-0 transition-opacity duration-200 ${visible ? 'opacity-100' : 'opacity-0'}`
-            : `top-0 left-0 bottom-0 w-[440px] transition-transform duration-250 ease-out ${
+            : `top-0 left-0 bottom-0 w-full sm:w-[min(46rem,55vw)] transition-transform duration-250 ease-out ${
                 visible ? 'translate-x-0' : '-translate-x-full'
               }`
         }`}

@@ -9,6 +9,8 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { ThemeProvider } from '@/lib/theme'
 import { HelpProvider } from '@/hooks/use-help'
 import { HelpPanel } from '@/components/help/HelpPanel'
+import { TtsPlayerBar } from '@/components/tts/TtsPlayerBar'
+import { DesktopUpdateBanner } from '@/components/desktop/DesktopUpdateBanner'
 import { CustomCssStyles } from '@/components/settings/CustomCssPanel'
 import { useCustomCss } from '@/lib/theme'
 import appCss from '../styles.css?url'
@@ -81,7 +83,9 @@ window.__errata_loaded_fonts=active;
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    // The theme/font boot scripts mutate <html> (class, style) before React
+    // hydrates, which is an intentional, expected hydration difference.
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
@@ -110,6 +114,8 @@ function RootComponent() {
           <HelpProvider>
             <Outlet />
             <HelpPanel />
+            <TtsPlayerBar />
+            <DesktopUpdateBanner />
           </HelpProvider>
         </TooltipProvider>
       </QueryClientProvider>

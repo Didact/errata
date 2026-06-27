@@ -4,6 +4,7 @@ import {
   createStory,
   createFragment,
   getFragment,
+  updateStory,
 } from '@/server/fragments/storage'
 import type { StoryMeta, Fragment } from '@/server/fragments/schema'
 import { createFragmentTools } from '@/server/llm/tools'
@@ -374,6 +375,38 @@ describe('LLM tools', () => {
       expect(typeNames).toContain('knowledge')
       expect(typeNames).toContain('image')
       expect(typeNames).toContain('icon')
+    })
+
+    it('includes custom fragment types from story settings', async () => {
+      const story = makeStory()
+      await updateStory(dataDir, {
+        ...story,
+        settings: {
+          ...story.settings,
+          customFragmentTypes: [{
+            type: 'location',
+            name: 'Locations',
+            description: 'Places and geography',
+            icon: 'MapPin',
+            showInSidebar: true,
+          }],
+        },
+      })
+
+      const tools = createFragmentTools(dataDir, storyId)
+      const result = await tools.listFragmentTypes.execute!(
+        {},
+        { toolCallId: 'tc-1', messages: [] },
+      )
+
+      expect(result.types).toContainEqual({
+        type: 'location',
+        prefix: 'loca',
+        stickyByDefault: false,
+        name: 'Locations',
+        description: 'Places and geography',
+        custom: true,
+      })
     })
   })
 })

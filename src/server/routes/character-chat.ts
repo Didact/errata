@@ -106,8 +106,9 @@ export function characterChatRoutes(dataDir: string) {
         return { error: 'At least one message is required' }
       }
 
+      let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
-        const agent = createAgentInstance('character-chat.chat', { dataDir, storyId: params.storyId })
+        agent = createAgentInstance('character-chat.chat', { dataDir, storyId: params.storyId })
         const { eventStream, completion } = await agent.execute({
           characterId: conv.characterId,
           persona: conv.persona,
@@ -150,6 +151,7 @@ export function characterChatRoutes(dataDir: string) {
           headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
         })
       } catch (err) {
+        agent?.fail(err)
         requestLogger.error('Character chat failed', { error: err instanceof Error ? err.message : String(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }

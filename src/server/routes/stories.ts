@@ -35,6 +35,8 @@ export function storyRoutes(dataDir: string) {
           maxSteps: 10,
           modelOverrides: {},
           generationMode: 'standard' as const,
+          clarifyBeforeGenerate: false,
+          prewriterReasoning: 'normal' as const,
           disableLibrarianAutoAnalysis: false,
           autoApplyLibrarianSuggestions: false,
           disableLibrarianDirections: false,
@@ -42,6 +44,7 @@ export function storyRoutes(dataDir: string) {
           disableThinking: false,
           contextOrderMode: 'simple' as const,
           fragmentOrder: [],
+          customFragmentTypes: [],
           contextCompact: { type: 'proseLimit' as const, value: 10 },
           summaryCompact: { maxCharacters: 12000, targetCharacters: 9000 },
           enableHierarchicalSummary: false,
@@ -143,33 +146,51 @@ export function storyRoutes(dataDir: string) {
         set.status = 404
         return { error: 'Story not found' }
       }
+      const settings = {
+        ...existing.settings,
+        ...(body.enabledPlugins !== undefined ? { enabledPlugins: body.enabledPlugins } : {}),
+        ...(body.outputFormat !== undefined ? { outputFormat: body.outputFormat } : {}),
+        ...(body.summarizationThreshold !== undefined ? { summarizationThreshold: body.summarizationThreshold } : {}),
+        ...(body.maxSteps !== undefined ? { maxSteps: body.maxSteps } : {}),
+        ...(body.modelOverrides !== undefined ? { modelOverrides: body.modelOverrides } : {}),
+        // Legacy fields (kept for backward compat with older clients)
+        ...(body.providerId !== undefined ? { providerId: body.providerId } : {}),
+        ...(body.modelId !== undefined ? { modelId: body.modelId } : {}),
+        ...(body.generationMode !== undefined ? { generationMode: body.generationMode } : {}),
+        ...(body.clarifyBeforeGenerate !== undefined ? { clarifyBeforeGenerate: body.clarifyBeforeGenerate } : {}),
+        ...(body.prewriterReasoning !== undefined ? { prewriterReasoning: body.prewriterReasoning } : {}),
+        ...(body.disableLibrarianAutoAnalysis !== undefined ? { disableLibrarianAutoAnalysis: body.disableLibrarianAutoAnalysis } : {}),
+        ...(body.autoApplyLibrarianSuggestions !== undefined ? { autoApplyLibrarianSuggestions: body.autoApplyLibrarianSuggestions } : {}),
+        ...(body.disableLibrarianDirections !== undefined ? { disableLibrarianDirections: body.disableLibrarianDirections } : {}),
+        ...(body.disableLibrarianSuggestions !== undefined ? { disableLibrarianSuggestions: body.disableLibrarianSuggestions } : {}),
+        ...(body.contextOrderMode !== undefined ? { contextOrderMode: body.contextOrderMode } : {}),
+        ...(body.fragmentOrder !== undefined ? { fragmentOrder: body.fragmentOrder } : {}),
+        ...(body.customFragmentTypes !== undefined ? { customFragmentTypes: body.customFragmentTypes } : {}),
+        ...(body.contextCompact !== undefined ? { contextCompact: body.contextCompact } : {}),
+        ...(body.summaryCompact !== undefined ? { summaryCompact: body.summaryCompact } : {}),
+        ...(body.enableHierarchicalSummary !== undefined ? { enableHierarchicalSummary: body.enableHierarchicalSummary } : {}),
+        ...(body.disableThinking !== undefined ? { disableThinking: body.disableThinking } : {}),
+      }
+
+      const applyGuidedPrompt = (
+        field: 'guidedContinuePrompt' | 'guidedSceneSettingPrompt' | 'guidedSuggestPrompt',
+        value: string | undefined,
+      ) => {
+        if (value === undefined) return
+        if (value.trim() === '') {
+          delete settings[field]
+        } else {
+          settings[field] = value
+        }
+      }
+
+      applyGuidedPrompt('guidedContinuePrompt', body.guidedContinuePrompt)
+      applyGuidedPrompt('guidedSceneSettingPrompt', body.guidedSceneSettingPrompt)
+      applyGuidedPrompt('guidedSuggestPrompt', body.guidedSuggestPrompt)
+
       const updated: StoryMeta = {
         ...existing,
-        settings: {
-          ...existing.settings,
-          ...(body.enabledPlugins !== undefined ? { enabledPlugins: body.enabledPlugins } : {}),
-          ...(body.outputFormat !== undefined ? { outputFormat: body.outputFormat } : {}),
-          ...(body.summarizationThreshold !== undefined ? { summarizationThreshold: body.summarizationThreshold } : {}),
-          ...(body.maxSteps !== undefined ? { maxSteps: body.maxSteps } : {}),
-          ...(body.modelOverrides !== undefined ? { modelOverrides: body.modelOverrides } : {}),
-          // Legacy fields (kept for backward compat with older clients)
-          ...(body.providerId !== undefined ? { providerId: body.providerId } : {}),
-          ...(body.modelId !== undefined ? { modelId: body.modelId } : {}),
-          ...(body.generationMode !== undefined ? { generationMode: body.generationMode } : {}),
-          ...(body.disableLibrarianAutoAnalysis !== undefined ? { disableLibrarianAutoAnalysis: body.disableLibrarianAutoAnalysis } : {}),
-          ...(body.autoApplyLibrarianSuggestions !== undefined ? { autoApplyLibrarianSuggestions: body.autoApplyLibrarianSuggestions } : {}),
-          ...(body.disableLibrarianDirections !== undefined ? { disableLibrarianDirections: body.disableLibrarianDirections } : {}),
-          ...(body.disableLibrarianSuggestions !== undefined ? { disableLibrarianSuggestions: body.disableLibrarianSuggestions } : {}),
-          ...(body.contextOrderMode !== undefined ? { contextOrderMode: body.contextOrderMode } : {}),
-          ...(body.fragmentOrder !== undefined ? { fragmentOrder: body.fragmentOrder } : {}),
-          ...(body.contextCompact !== undefined ? { contextCompact: body.contextCompact } : {}),
-          ...(body.summaryCompact !== undefined ? { summaryCompact: body.summaryCompact } : {}),
-          ...(body.enableHierarchicalSummary !== undefined ? { enableHierarchicalSummary: body.enableHierarchicalSummary } : {}),
-          ...(body.guidedContinuePrompt !== undefined ? { guidedContinuePrompt: body.guidedContinuePrompt } : {}),
-          ...(body.guidedSceneSettingPrompt !== undefined ? { guidedSceneSettingPrompt: body.guidedSceneSettingPrompt } : {}),
-          ...(body.guidedSuggestPrompt !== undefined ? { guidedSuggestPrompt: body.guidedSuggestPrompt } : {}),
-          ...(body.disableThinking !== undefined ? { disableThinking: body.disableThinking } : {}),
-        },
+        settings,
         updatedAt: new Date().toISOString(),
       }
       await updateStory(dataDir, updated)
@@ -189,12 +210,21 @@ export function storyRoutes(dataDir: string) {
         providerId: t.Optional(t.Union([t.String(), t.Null()])),
         modelId: t.Optional(t.Union([t.String(), t.Null()])),
         generationMode: t.Optional(t.Union([t.Literal('standard'), t.Literal('prewriter')])),
+        clarifyBeforeGenerate: t.Optional(t.Boolean()),
+        prewriterReasoning: t.Optional(t.Union([t.Literal('short'), t.Literal('normal'), t.Literal('extensive')])),
         disableLibrarianAutoAnalysis: t.Optional(t.Boolean()),
         autoApplyLibrarianSuggestions: t.Optional(t.Boolean()),
         disableLibrarianDirections: t.Optional(t.Boolean()),
         disableLibrarianSuggestions: t.Optional(t.Boolean()),
         contextOrderMode: t.Optional(t.Union([t.Literal('simple'), t.Literal('advanced')])),
         fragmentOrder: t.Optional(t.Array(t.String())),
+        customFragmentTypes: t.Optional(t.Array(t.Object({
+          type: t.String(),
+          name: t.String(),
+          description: t.String(),
+          icon: t.String(),
+          showInSidebar: t.Boolean(),
+        }))),
         contextCompact: t.Optional(t.Object({
           type: t.Union([t.Literal('proseLimit'), t.Literal('maxTokens'), t.Literal('maxCharacters')]),
           value: t.Number(),

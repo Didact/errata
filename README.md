@@ -12,7 +12,6 @@ Join the community on Discord: https://discord.gg/ywVFKvdH49
 - **Prose chain + writing panel** — branchable prose with regenerate/refine/switch/remove, selection transforms (rewrite/expand/compress), and a dedicated long-form editor view
 - **Two-phase prewriter** — optional planner agent distills full context into a focused writing brief before the writer generates, keeping output grounded while reducing token waste
 - **Per-role model selection** — assign different providers and models to generation, librarian, character chat, directions, and individual agents with automatic fallback chains
-- **Model-specific instructions** — drop JSON files to override any system prompt per model family (exact match or regex), so you can tune prompts for DeepSeek vs Anthropic vs OpenAI
 - **Story direction suggestions** — AI-generated "what happens next?" options with customizable prompt templates and guided direction mode
 - **Character Chat mode** — story-scoped chat with streaming responses, provider/model selection, and character portraits
 - **Block-based context** — visual editor for reordering, overriding, and extending LLM prompt structure, including JavaScript-powered script blocks with live preview

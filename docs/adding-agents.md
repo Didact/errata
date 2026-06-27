@@ -600,28 +600,15 @@ The chain is derived automatically by popping the last segment at each step, wit
 
 Only **namespace-level** roles need explicit registration in `modelRoleRegistry` (e.g. `librarian`, `character-chat`). Per-agent resolution happens automatically. Users configure namespace-level models in Settings and per-agent models in the Agent Context panel.
 
-## Instruction Overrides
+## Customizing Instructions
 
-The instruction registry allows users to swap system prompts per model without changing code. When you register:
+The instruction registry holds the built-in default text for each prompt. When you register:
 
 ```ts
 instructionRegistry.registerDefault('librarian.optimize-character.system', OPTIMIZE_CHARACTER_SYSTEM_PROMPT)
 ```
 
-Users can create a JSON file at `data/instruction-sets/my-overrides.json`:
-
-```json
-{
-  "name": "DeepSeek Character Optimization",
-  "modelMatch": "/deepseek-.*/i",
-  "priority": 50,
-  "instructions": {
-    "librarian.optimize-character.system": "Alternative prompt text for DeepSeek models..."
-  }
-}
-```
-
-When the agent runs with a DeepSeek model, `instructionRegistry.resolve(key, modelId)` returns the override instead of the default. See `docs/instruction-registry.md` for full details.
+`instructionRegistry.resolve(key)` returns that default at request time. Users customize the prompt per story through the Agent Context panel — the block built from this instruction can be overridden, disabled, or reordered like any other agent block. (The older model-specific JSON override layer at `data/instruction-sets/` was removed in favor of agent blocks.) See `docs/instruction-registry.md` for the key listing.
 
 ## Testing
 

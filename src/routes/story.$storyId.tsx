@@ -51,6 +51,7 @@ import { CharacterChatView } from '@/components/character-chat/CharacterChatView
 import { AgentActivityIndicator } from '@/components/AgentActivityIndicator'
 import { useTimelineBar } from '@/lib/theme'
 import { initClientPluginPanels } from '@/lib/plugin-panel-init'
+import { ErratanetIntroPrompt } from '@/components/erratanet/ErratanetIntroPrompt'
 
 export const Route = createFileRoute('/story/$storyId')({
   component: StoryEditorPage,
@@ -97,6 +98,16 @@ function StoryEditorPage() {
     if (typeof window === 'undefined') return
     localStorage.setItem(OUTLINE_OPEN_KEY, outlineOpen ? '1' : '0')
   }, [outlineOpen])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('openrouter_oauth') === '1') {
+      setShowProviders(true)
+      notifyPluginPanelOpen({ panel: 'providers' }, { storyId })
+    }
+  }, [storyId])
+
   const dragCounter = useRef(0)
 
   const { data: story, isLoading } = useQuery({
@@ -543,6 +554,9 @@ function StoryEditorPage() {
         onCreateFragment={handleCreateFragment}
         selectedFragmentId={selectedFragment?.id}
         onManageProviders={() => {
+          // Close the settings overlay so the providers panel isn't stuck behind
+          // its blurred backdrop.
+          setActiveSection(null)
           setShowProviders(true)
           notifyPluginPanelOpen({ panel: 'providers' }, { storyId })
         }}
@@ -573,6 +587,25 @@ function StoryEditorPage() {
         <div className="md:hidden absolute top-3 left-3 z-20">
           <SidebarTrigger className="size-9 bg-background/80 backdrop-blur-sm border border-border/40 shadow-sm" />
         </div>
+
+        {/* Mobile view entry — jump to character chat (prose view only; the
+            chat surface has its own header with a control back to prose). The
+            desktop Prose/Chat toggle is hidden below md, so without this the
+            chat view is unreachable on touch. */}
+        {mainView === 'prose' && (
+          <div className="md:hidden absolute top-3 right-3 z-20">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-9 bg-background/80 backdrop-blur-sm border border-border/40 shadow-sm"
+              onClick={() => setMainView('character-chat')}
+              title="Character chat"
+              aria-label="Open character chat"
+            >
+              <MessageSquare className="size-4" />
+            </Button>
+          </div>
+        )}
 
         {/* Floating agent activity wisps */}
         <AgentActivityIndicator storyId={storyId} />
@@ -796,6 +829,8 @@ function StoryEditorPage() {
         initialCardData={cardImportData}
         imageDataUrl={cardImportImageUrl}
       />
+
+      <ErratanetIntroPrompt />
 
       <Dialog open={!!pendingAgentConfigImport} onOpenChange={(open) => { if (!open) setPendingAgentConfigImport(null) }}>
         <DialogContent>

@@ -4,6 +4,12 @@ import { existsSync } from 'node:fs'
 import { getContentRoot } from '../fragments/branches'
 import { generateConversationId } from '@/lib/fragment-ids'
 import { writeJsonAtomic } from '../fs-utils'
+import { withKeyLock } from '../async-lock'
+
+/** Serializes read-modify-write of a story's analysis index against concurrent saves. */
+function withIndexLock<T>(storyId: string, fn: () => Promise<T>): Promise<T> {
+  return withKeyLock(`librarian-index:${storyId}`, fn)
+}
 
 // --- Types ---
 
@@ -223,12 +229,14 @@ export async function clearAnalysisIndexEntry(
   storyId: string,
   fragmentId: string,
 ): Promise<void> {
-  const index = await getAnalysisIndex(dataDir, storyId)
-  if (!index) return
-  if (!(fragmentId in index.latestByFragmentId)) return
-  delete index.latestByFragmentId[fragmentId]
-  index.updatedAt = new Date().toISOString()
-  await saveAnalysisIndex(dataDir, storyId, index)
+  await withIndexLock(storyId, async () => {
+    const index = await getAnalysisIndex(dataDir, storyId)
+    if (!index) return
+    if (!(fragmentId in index.latestByFragmentId)) return
+    delete index.latestByFragmentId[fragmentId]
+    index.updatedAt = new Date().toISOString()
+    await saveAnalysisIndex(dataDir, storyId, index)
+  })
 }
 
 export async function getLatestAnalysisIdsByFragment(
@@ -256,16 +264,20 @@ export async function saveAnalysis(
     analysis,
   )
 
-  const currentIndex = await getAnalysisIndex(dataDir, storyId) ?? defaultAnalysisIndex()
-  const previous = currentIndex.latestByFragmentId[analysis.fragmentId]
-  if (shouldReplaceIndexEntry(previous, { createdAt: analysis.createdAt, analysisId: analysis.id })) {
-    currentIndex.latestByFragmentId[analysis.fragmentId] = {
-      analysisId: analysis.id,
-      createdAt: analysis.createdAt,
+  // Index read-modify-write must be serialized: concurrent saves would each read
+  // the same index and the later write would drop the earlier entry.
+  await withIndexLock(storyId, async () => {
+    const currentIndex = await getAnalysisIndex(dataDir, storyId) ?? defaultAnalysisIndex()
+    const previous = currentIndex.latestByFragmentId[analysis.fragmentId]
+    if (shouldReplaceIndexEntry(previous, { createdAt: analysis.createdAt, analysisId: analysis.id })) {
+      currentIndex.latestByFragmentId[analysis.fragmentId] = {
+        analysisId: analysis.id,
+        createdAt: analysis.createdAt,
+      }
     }
-  }
-  currentIndex.updatedAt = new Date().toISOString()
-  await saveAnalysisIndex(dataDir, storyId, currentIndex)
+    currentIndex.updatedAt = new Date().toISOString()
+    await saveAnalysisIndex(dataDir, storyId, currentIndex)
+  })
 }
 
 export async function getAnalysis(
@@ -306,15 +318,17 @@ export async function deleteAnalysis(
   await unlink(path)
 
   // Clean up index entry if it points to this analysis
-  const index = await getAnalysisIndex(dataDir, storyId)
-  if (index) {
-    const entry = index.latestByFragmentId[analysis.fragmentId]
-    if (entry && entry.analysisId === analysisId) {
-      delete index.latestByFragmentId[analysis.fragmentId]
-      index.updatedAt = new Date().toISOString()
-      await saveAnalysisIndex(dataDir, storyId, index)
+  await withIndexLock(storyId, async () => {
+    const index = await getAnalysisIndex(dataDir, storyId)
+    if (index) {
+      const entry = index.latestByFragmentId[analysis.fragmentId]
+      if (entry && entry.analysisId === analysisId) {
+        delete index.latestByFragmentId[analysis.fragmentId]
+        index.updatedAt = new Date().toISOString()
+        await saveAnalysisIndex(dataDir, storyId, index)
+      }
     }
-  }
+  })
 
   return true
 }

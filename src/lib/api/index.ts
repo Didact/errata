@@ -20,9 +20,11 @@ export { agentBlocks } from './agent-blocks'
 export { agents } from './agents'
 export { tokenUsage } from './token-usage'
 export { folders } from './folders'
+export { sharing } from './sharing'
+export { erratanet } from './erratanet'
 
 // HTTP Client utilities (exported for advanced use cases)
-export { apiFetch, fetchStream, fetchEventStream } from './client'
+export { apiFetch, fetchStream, fetchEventStream, ApiError } from './client'
 
 // Combined API object for backward compatibility
 import { stories } from './stories'
@@ -41,6 +43,8 @@ import { agentBlocks } from './agent-blocks'
 import { agents } from './agents'
 import { tokenUsage } from './token-usage'
 import { folders } from './folders'
+import { sharing } from './sharing'
+import { erratanet } from './erratanet'
 
 export const api = {
   stories,
@@ -59,4 +63,6 @@ export const api = {
   agents,
   tokenUsage,
   folders,
+  sharing,
+  erratanet,
 }

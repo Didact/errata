@@ -4,9 +4,10 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { api, type Fragment, type ProseChainEntry } from '@/lib/api'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { StreamMarkdown } from '@/components/ui/stream-markdown'
-import { Loader2, Wand2, Bookmark } from 'lucide-react'
+import { Loader2, Wand2, Bookmark, List } from 'lucide-react'
 import { Hint } from '@/components/ui/prose-text'
 import { useQuickSwitch, useProseWidth, PROSE_WIDTH_VALUES, useCharacterMentions } from '@/lib/theme'
+import { parseVisualRefs } from '@/lib/fragment-visuals'
 import { ProseBlock } from './ProseBlock'
 import { ChapterMarker } from './ChapterMarker'
 import { InlineGenerationInput, type ThoughtStep } from './InlineGenerationInput'
@@ -192,6 +193,7 @@ export function ProseChainView({
 }: ProseChainViewProps) {
 
   const [activeIndex, setActiveIndex] = useState(0)
+  const [mobileTocOpen, setMobileTocOpen] = useState(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const [quickSwitch] = useQuickSwitch()
   const [proseWidth] = useProseWidth()
@@ -222,10 +224,16 @@ export function ProseChainView({
     enabled: mentionsEnabled,
   })
 
+  // Prose headers need image fragments even when character-mentions are off.
+  const anyProseHasImage = useMemo(
+    () => fragments.some((f) => parseVisualRefs(f.meta).some((r) => r.kind === 'image')),
+    [fragments],
+  )
+
   const { data: imageFragments = [] } = useQuery({
     queryKey: ['fragments', storyId, 'image'],
     queryFn: () => api.fragments.list(storyId, 'image'),
-    enabled: mentionsEnabled,
+    enabled: mentionsEnabled || anyProseHasImage,
   })
 
   const { data: iconFragments = [] } = useQuery({
@@ -515,7 +523,7 @@ export function ProseChainView({
 
   return (
     <div className="flex flex-1 min-h-0 relative" data-component-id="prose-chain-root">
-      <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0" data-component-id="prose-chain-scroll">
+      <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0 min-w-0" data-component-id="prose-chain-scroll">
         {/* Cover image banner */}
         {coverImage && (
           <div className="relative w-full overflow-hidden" style={{ maxHeight: 280 }}>
@@ -529,7 +537,7 @@ export function ProseChainView({
           </div>
         )}
         <CharacterMentionProvider characters={characterFragments} mediaById={mediaById}>
-        <div className="mx-auto py-6 px-4 sm:py-12 sm:px-8" style={{ maxWidth: PROSE_WIDTH_VALUES[proseWidth] }}>
+        <div className="mx-auto w-full py-6 px-4 sm:py-12 sm:px-8" style={{ maxWidth: PROSE_WIDTH_VALUES[proseWidth] }}>
           {orderedItems.length > 0 ? (
             useVirtual ? (
               /* Virtualized rendering for long stories */
@@ -585,6 +593,7 @@ export function ProseChainView({
                           mentionsEnabled={mentionsEnabled}
                           mentionColors={mentionColors}
                           onClickMention={handleMentionClick}
+                          mediaById={mediaById}
                         />
                       )}
                       {!isMarker && !nextIsMarker && (
@@ -634,6 +643,7 @@ export function ProseChainView({
                           mentionsEnabled={mentionsEnabled}
                           mentionColors={mentionColors}
                           onClickMention={handleMentionClick}
+                          mediaById={mediaById}
                         />
                       )}
                       {!isMarker && !nextIsMarker && (
@@ -674,7 +684,7 @@ export function ProseChainView({
         </CharacterMentionProvider>
       </ScrollArea>
 
-      {/* Outline panel — hidden on mobile */}
+      {/* Outline panel — side rail on desktop */}
       {orderedItems.length > 1 && (
         <div className="hidden md:flex">
           <ProseOutlinePanel
@@ -685,6 +695,39 @@ export function ProseChainView({
             onJump={scrollToIndex}
           />
         </div>
+      )}
+
+      {/* Outline on mobile — a trigger that opens the passages as a full-screen
+          overlay (no room for a persistent rail). Sits left of the chat button. */}
+      {orderedItems.length > 1 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setMobileTocOpen(true)}
+            title="Passages"
+            aria-label="Open passages outline"
+            data-component-id="prose-mobile-toc-trigger"
+            className="md:hidden absolute top-3 right-14 z-20 flex items-center justify-center size-9 rounded-md bg-background/80 backdrop-blur-sm border border-border/40 shadow-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <List className="size-4" />
+          </button>
+          {mobileTocOpen && (
+            <div
+              className="md:hidden fixed inset-0 z-40 bg-background animate-in fade-in duration-150"
+              data-component-id="prose-mobile-toc-overlay"
+            >
+              <ProseOutlinePanel
+                storyId={storyId}
+                fragments={orderedItems}
+                activeIndex={activeIndex}
+                open
+                mobile
+                onClose={() => setMobileTocOpen(false)}
+                onJump={(i) => { scrollToIndex(i); setMobileTocOpen(false) }}
+              />
+            </div>
+          )}
+        </>
       )}
     </div>
   )

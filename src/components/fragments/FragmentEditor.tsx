@@ -459,7 +459,7 @@ export function FragmentEditor({
                   data-component-id={fragmentComponentId(fragment, 'copy-clipboard')}
                 >
                   {copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
-                  {copied ? 'Copied' : 'Copy'}
+                  <span className="hidden sm:inline">{copied ? 'Copied' : 'Copy'}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">Copy fragment to clipboard</TooltipContent>
@@ -475,7 +475,7 @@ export function FragmentEditor({
                   onClick={() => setShowRefine(!showRefine)}
                 >
                   <Sparkles className="size-3" />
-                  Refine
+                  <span className="hidden sm:inline">Refine</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">Refine this fragment with Librarian</TooltipContent>
@@ -492,7 +492,7 @@ export function FragmentEditor({
                   disabled={metaMutation.isPending}
                 >
                   {isLocked ? <Lock className="size-3" /> : <Unlock className="size-3" />}
-                  {isLocked ? 'Locked' : 'Lock'}
+                  <span className="hidden sm:inline">{isLocked ? 'Locked' : 'Lock'}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">{isLocked ? 'Unlock — allow AI modifications' : 'Lock — prevent AI from modifying'}</TooltipContent>
@@ -510,7 +510,7 @@ export function FragmentEditor({
                   data-component-id={fragmentComponentId(fragment, 'sticky-toggle')}
                 >
                   <Pin className="size-3" />
-                  {fragment.sticky ? 'Unpin' : 'Pin'}
+                  <span className="hidden sm:inline">{fragment.sticky ? 'Unpin' : 'Pin'}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">{fragment.sticky ? 'Remove from context' : 'Always include in context'}</TooltipContent>
@@ -528,7 +528,7 @@ export function FragmentEditor({
                   data-component-id={fragmentComponentId(fragment, 'placement-toggle')}
                 >
                   {fragment.placement === 'system' ? <Monitor className="size-3" /> : <User className="size-3" />}
-                  {fragment.placement === 'system' ? 'System' : 'User'}
+                  <span className="hidden sm:inline">{fragment.placement === 'system' ? 'System' : 'User'}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">{fragment.placement === 'system' ? 'Placed in system context' : 'Placed in user context'}</TooltipContent>
@@ -549,7 +549,7 @@ export function FragmentEditor({
                   disabled={archiveMutation.isPending}
                 >
                   <Archive className="size-3" />
-                  Archive
+                  <span className="hidden sm:inline">Archive</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">Move to archive</TooltipContent>
@@ -567,7 +567,7 @@ export function FragmentEditor({
                     disabled={restoreMutation.isPending}
                   >
                     <Undo2 className="size-3" />
-                    Restore
+                    <span className="hidden sm:inline">Restore</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">Restore from archive</TooltipContent>

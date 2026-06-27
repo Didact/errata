@@ -112,9 +112,11 @@ export async function summarizeChapter(
         trace.push({ type: 'reasoning-delta', text })
         break
       }
+      case 'finish-step':
+        stepCount++
+        break
       case 'finish':
         lastFinishReason = (p.finishReason as string) ?? 'unknown'
-        stepCount++
         trace.push({ type: 'finish', finishReason: lastFinishReason, stepCount })
         break
     }

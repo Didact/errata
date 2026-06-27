@@ -205,6 +205,89 @@ export { hexagonPoints, diamondPoints }
 
 export const CHARACTER_MENTION_COLORS = TYPE_PALETTES.character.colors
 
+// ── Prose header images ───────────────────────────────
+// A prose fragment can carry an image visualRef that renders as a framed
+// "plate" at the top of the passage. The frame's shape is chosen per-prose
+// and stored in meta.headerAspect.
+
+export type HeaderAspectId = '21:9' | '16:9' | '3:2' | '1:1' | 'original'
+
+export interface HeaderAspectOption {
+  id: HeaderAspectId
+  /** Short label shown in the ratio control. */
+  label: string
+  /** Spoken/title label for assistive tech. */
+  title: string
+  /** width / height; null means the image's natural shape (no crop). */
+  ratio: number | null
+}
+
+// Cinematic plate first — it reads most like a hardback illustration.
+export const HEADER_ASPECT_RATIOS: HeaderAspectOption[] = [
+  { id: '21:9', label: '21:9', title: 'Cinematic 21:9', ratio: 21 / 9 },
+  { id: '16:9', label: '16:9', title: 'Wide 16:9', ratio: 16 / 9 },
+  { id: '3:2', label: '3:2', title: 'Photo 3:2', ratio: 3 / 2 },
+  { id: '1:1', label: '1:1', title: 'Square 1:1', ratio: 1 },
+  { id: 'original', label: 'Full', title: 'Original shape', ratio: null },
+]
+
+export const DEFAULT_HEADER_ASPECT: HeaderAspectId = '21:9'
+
+export function parseHeaderAspect(meta: Record<string, unknown> | undefined): HeaderAspectId {
+  const raw = meta?.headerAspect
+  if (typeof raw === 'string' && HEADER_ASPECT_RATIOS.some((o) => o.id === raw)) {
+    return raw as HeaderAspectId
+  }
+  return DEFAULT_HEADER_ASPECT
+}
+
+export interface HeaderImage {
+  imageUrl: string
+  name: string
+  boundary?: BoundaryBox
+}
+
+/**
+ * Resolve the header image for a fragment: the first *image*-kind visual ref
+ * (icons are avatar-scale and never used as a banner). Returns null unless a
+ * linked image fragment with a usable URL exists.
+ */
+export function resolveHeaderImage(
+  fragment: Fragment,
+  mediaById: Map<string, Fragment>,
+): HeaderImage | null {
+  const ref = parseVisualRefs(fragment.meta).find((r) => r.kind === 'image')
+  if (!ref) return null
+  const media = mediaById.get(ref.fragmentId)
+  if (!media) return null
+  const imageUrl = readImageUrl(media)
+  if (!imageUrl) return null
+  return { imageUrl, name: media.name, boundary: ref.boundary }
+}
+
+/**
+ * `object-position` for a cover-fit header that keeps the crop region's center
+ * in view. Falls back to a centered crop when no boundary is set.
+ */
+export function headerFocalPosition(boundary?: BoundaryBox): string {
+  if (!boundary) return '50% 50%'
+  const clamp = (n: number) => Math.max(0, Math.min(1, n))
+  const fx = clamp(boundary.x + boundary.width / 2)
+  const fy = clamp(boundary.y + boundary.height / 2)
+  const fmt = (n: number) => `${Number((n * 100).toFixed(2))}%`
+  return `${fmt(fx)} ${fmt(fy)}`
+}
+
+export function parseHeaderFade(meta: Record<string, unknown> | undefined): boolean {
+  return meta?.headerFade === true
+}
+
+// Fades a header image's top and bottom edges into transparency so the
+// illustration bleeds into the page (parchment, dark, or high-contrast alike)
+// instead of sitting inside a hard frame. Applied as a CSS mask on the image.
+export const HEADER_FADE_MASK =
+  'linear-gradient(to bottom, transparent 0%, #000 12%, #000 88%, transparent 100%)'
+
 export function resolveFragmentVisual(fragment: Fragment, mediaById: Map<string, Fragment>): {
   imageUrl: string | null
   boundary?: BoundaryBox

@@ -23,7 +23,7 @@ import {
   Check,
   Circle,
 } from 'lucide-react'
-import { useWritingTransforms } from '@/lib/theme'
+import { useWritingTransforms, useTransformContext, TRANSFORM_CONTEXT_CHARS } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 import { Caption } from '@/components/ui/prose-text'
 
@@ -180,6 +180,7 @@ export function ProseWritingPanel({
   const [customTransformLabel, setCustomTransformLabel] = useState<string | null>(null)
   const [showTransformUndo, setShowTransformUndo] = useState(false)
   const [writingTransforms] = useWritingTransforms()
+  const [transformContext] = useTransformContext()
   const enabledTransforms = writingTransforms.filter(t => t.enabled)
   const sidebarScrollRef = useRef<HTMLDivElement>(null)
   const dirtyRef = useRef(false)
@@ -491,8 +492,9 @@ export function ProseWritingPanel({
     setShowTransformUndo(false)
 
     try {
-      const contextBefore = editor.state.doc.textBetween(Math.max(0, from - 240), from, '\n')
-      const contextAfter = editor.state.doc.textBetween(to, Math.min(editor.state.doc.content.size, to + 240), '\n')
+      const radius = TRANSFORM_CONTEXT_CHARS[transformContext]
+      const contextBefore = editor.state.doc.textBetween(Math.max(0, from - radius), from, '\n')
+      const contextAfter = editor.state.doc.textBetween(to, Math.min(editor.state.doc.content.size, to + radius), '\n')
 
       const stream = await api.librarian.transformProseSelection(
         storyId,

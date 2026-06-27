@@ -1,5 +1,6 @@
 import { memo, useMemo, type ReactNode, Children, isValidElement, cloneElement } from 'react'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 type StreamMarkdownVariant = 'default' | 'prose'
 
@@ -25,6 +26,10 @@ const variantStyles: Record<StreamMarkdownVariant, {
   heading: string
   blockquote: string
   hr: string
+  tableWrap: string
+  table: string
+  th: string
+  td: string
   cursor: string
   /** Plain text paragraph style used during streaming to avoid costly markdown parsing */
   streamingP: string
@@ -42,6 +47,10 @@ const variantStyles: Record<StreamMarkdownVariant, {
     heading: 'font-semibold mb-1',
     blockquote: 'border-l-2 border-border/50 pl-2 my-1.5 text-muted-foreground',
     hr: 'border-border/30 my-2',
+    tableWrap: 'block my-2 max-w-full overflow-x-auto rounded-md border border-border/30',
+    table: 'w-full min-w-max border-collapse text-[0.6875rem]',
+    th: 'border-b border-border/30 bg-muted/40 px-2 py-1 text-left font-semibold text-foreground/80 whitespace-nowrap',
+    td: 'border-t border-border/20 px-2 py-1 text-foreground/75 align-top',
     cursor: 'inline-block w-0.5 h-[1em] bg-primary/60 animate-pulse ml-px align-text-bottom',
     streamingP: 'mb-2 last:mb-0',
   },
@@ -58,6 +67,10 @@ const variantStyles: Record<StreamMarkdownVariant, {
     heading: 'font-display font-normal text-[1.15em] mb-2 mt-4 first:mt-0',
     blockquote: 'border-l-2 border-primary/20 pl-4 my-4 italic text-foreground/70',
     hr: 'border-border/20 my-6',
+    tableWrap: 'block my-4 max-w-full overflow-x-auto rounded-md border border-border/25',
+    table: 'w-full min-w-max border-collapse text-[0.8em] font-sans',
+    th: 'border-b border-border/25 bg-muted/30 px-3 py-1.5 text-left font-semibold text-foreground/80 whitespace-nowrap',
+    td: 'border-t border-border/15 px-3 py-1.5 text-foreground/75 align-top',
     cursor: 'inline-block w-[2px] h-[1.1em] bg-primary/50 animate-pulse ml-0.5 align-text-bottom rounded-full',
     streamingP: 'mb-[0.85em] last:mb-0',
   },
@@ -114,16 +127,17 @@ export const StreamMarkdown = memo(function StreamMarkdown({
   // After streaming: render through markdown parser (once, O(n))
   if (streaming) {
     return (
-      <span className={`stream-markdown ${s.root}`}>
+      <div className={`stream-markdown ${s.root}`}>
         <StreamingText content={content} className={s.streamingP} textTransform={textTransform} />
         <span className={s.cursor} />
-      </span>
+      </div>
     )
   }
 
   return (
-    <span className={`stream-markdown ${s.root}`}>
+    <div className={`stream-markdown ${s.root}`}>
       <Markdown
+        remarkPlugins={[remarkGfm]}
         components={{
           p: ({ children }) => <p className={s.p}>{tx(children)}</p>,
           strong: ({ children }) => <strong className={s.strong}>{tx(children)}</strong>,
@@ -146,10 +160,17 @@ export const StreamMarkdown = memo(function StreamMarkdown({
             <blockquote className={s.blockquote}>{tx(children)}</blockquote>
           ),
           hr: () => <hr className={s.hr} />,
+          table: ({ children }) => (
+            <div className={s.tableWrap}>
+              <table className={s.table}>{children}</table>
+            </div>
+          ),
+          th: ({ children, style }) => <th className={s.th} style={style}>{tx(children)}</th>,
+          td: ({ children, style }) => <td className={s.td} style={style}>{tx(children)}</td>,
         }}
       >
         {content}
       </Markdown>
-    </span>
+    </div>
   )
 })

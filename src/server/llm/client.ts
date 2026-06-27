@@ -112,9 +112,12 @@ export async function getModel(dataDir: string, storyId?: string, opts: GetModel
       for (const r of chain) {
         // Check modelOverrides map first
         const override = overrides[r]
+        if (!targetModelId && override?.modelId) {
+          targetModelId = override.modelId
+        }
         if (override?.providerId) {
           targetProviderId = override.providerId
-          targetModelId = override.modelId ?? null
+          targetModelId = targetModelId || override.modelId || null
           if (override.temperature != null) {
             targetTemperature = override.temperature
           }
@@ -148,33 +151,42 @@ export async function getModel(dataDir: string, storyId?: string, opts: GetModel
   // 2. Load global config
   const globalConfig = await getGlobalConfig(dataDir)
 
-  // 3. Fall back to global default provider if story didn't specify one
-  if (!targetProviderId && globalConfig.defaultProviderId) {
-    targetProviderId = globalConfig.defaultProviderId
+  // 3. Build the candidate list in priority order: the story's configured
+  //    provider, then the global default. This way a story that points at a
+  //    now-disabled or deleted provider falls back to the default instead of
+  //    hard-failing with "No provider configured".
+  const candidateIds: string[] = []
+  if (targetProviderId) candidateIds.push(targetProviderId)
+  if (globalConfig.defaultProviderId && globalConfig.defaultProviderId !== targetProviderId) {
+    candidateIds.push(globalConfig.defaultProviderId)
   }
 
-  // 4. Try to find the provider in config
-  if (targetProviderId) {
-    const provider = globalConfig.providers.find((p) => p.id === targetProviderId && p.enabled)
-    if (provider) {
-      const oai = getCachedProvider(provider.id, provider.baseURL, provider.apiKey, provider.name, provider.customHeaders)
-      const modelId = targetModelId || provider.defaultModel
-      // Story-level temperature takes precedence over provider-level
-      const temperature = targetTemperature ?? provider.temperature
-      const toReturn = {
-        model: oai.chatModel(modelId),
-        providerId: provider.id,
-        modelId,
-        temperature,
-        config: {
-          providerName: provider.name,
-          baseURL: provider.baseURL,
-          headers: { ...(provider.customHeaders ?? {}) },
-        },
-      }
-      createLogger("models").debug('Resolved model', {...toReturn, model: "[hidden]"}) // Don't log the full model object to avoid spam
-      return toReturn
+  // 4. Use the first candidate that exists and is enabled.
+  for (const candidateId of candidateIds) {
+    const provider = globalConfig.providers.find((p) => p.id === candidateId && p.enabled)
+    if (!provider) continue
+
+    // When the story explicitly chose a provider that turned out unusable and we
+    // fell through to the default, its stored modelId belongs to the old provider
+    // — use the fallback provider's default model instead.
+    const usingFallback = targetProviderId != null && candidateId !== targetProviderId
+    const oai = getCachedProvider(provider.id, provider.baseURL, provider.apiKey, provider.name, provider.customHeaders)
+    const modelId = (usingFallback ? null : targetModelId) || provider.defaultModel
+    // Story-level temperature takes precedence over provider-level
+    const temperature = targetTemperature ?? provider.temperature
+    const toReturn = {
+      model: oai.chatModel(modelId),
+      providerId: provider.id,
+      modelId,
+      temperature,
+      config: {
+        providerName: provider.name,
+        baseURL: provider.baseURL,
+        headers: { ...(provider.customHeaders ?? {}) },
+      },
     }
+    createLogger("models").debug('Resolved model', {...toReturn, model: "[hidden]"}) // Don't log the full model object to avoid spam
+    return toReturn
   }
 
   // 5. No provider found — throw descriptive error

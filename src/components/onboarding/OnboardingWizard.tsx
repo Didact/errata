@@ -99,7 +99,8 @@ const PROVIDER_CARDS = {
   deepseek: {
     name: 'DeepSeek',
     baseURL: 'https://api.deepseek.com',
-    defaultModel: 'deepseek-chat',
+    defaultModel: 'deepseek-v4-flash',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     description: 'Fast and affordable. Great default for fiction writing.',
     accent: 'blue',
     customHeaders: {},
@@ -355,7 +356,7 @@ function TypographyStep({
         >
           Prose
         </p>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {FONT_CATALOGUE.prose.map((opt, i) => {
             const isActive = opt.name === activeProse
             return (
@@ -403,7 +404,7 @@ function TypographyStep({
           Headings
         </p>
         <div
-          className="grid grid-cols-3 gap-3 animate-onboarding-fade-up"
+          className="grid grid-cols-2 sm:grid-cols-3 gap-3 animate-onboarding-fade-up"
           style={{ animationDelay: '550ms' }}
         >
           {FONT_CATALOGUE.display.map((opt) => {
@@ -486,7 +487,7 @@ function WelcomeStep({
       </div>
 
       {/* Hero features: Librarian & Timelines */}
-      <div className="mt-10 grid grid-cols-2 gap-4">
+      <div className="mt-10 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div
           className="text-left p-5 rounded-xl border border-primary/15 bg-primary/[0.03] animate-onboarding-fade-up"
           style={{ animationDelay: '200ms' }}
@@ -846,7 +847,7 @@ function ProviderSetupStep({
                 value={defaultModel}
                 onChange={(e) => setDefaultModel(e.target.value)}
                 className={inputClass + ' flex-1'}
-                placeholder="e.g. deepseek-chat"
+                placeholder="e.g. deepseek-v4-flash"
               />
             )}
             <Button
@@ -865,6 +866,24 @@ function ProviderSetupStep({
               Fetch
             </Button>
           </div>
+          {(() => {
+            const suggested = (card as { models?: readonly string[] }).models ?? []
+            return suggested.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                <span className="text-[0.625rem] uppercase tracking-wider text-muted-foreground mr-0.5">Suggested</span>
+                {suggested.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setDefaultModel(m)}
+                    className={`px-2 py-0.5 rounded-full text-[0.6875rem] border transition-colors ${defaultModel === m ? 'border-primary/40 bg-primary/10 text-foreground' : 'border-border/50 text-muted-foreground hover:text-foreground/80 hover:bg-accent/40'}`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            ) : null
+          })()}
           {fetchedModels.length > 0 && (
             <button
               type="button"

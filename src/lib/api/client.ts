@@ -2,17 +2,35 @@ import type { ChatEvent } from './types'
 
 const API_BASE = '/api'
 
+/**
+ * Error thrown by {@link apiFetch} on a non-OK response. Carries the HTTP
+ * status and the parsed error body so callers can react to structured fields
+ * (e.g. `requiresConsent` on a 422), not just the message.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly data: Record<string, unknown> = {},
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers)
+  if (init?.body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
+    headers,
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error ?? `API error: ${res.status}`)
+    throw new ApiError(err.error ?? `API error: ${res.status}`, res.status, err)
   }
   return res.json()
 }

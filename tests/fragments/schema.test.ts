@@ -108,6 +108,7 @@ describe('StoryMetaSchema', () => {
     expect(result.summary).toBe('')
     expect(result.settings.outputFormat).toBe('markdown')
     expect(result.settings.enabledPlugins).toEqual([])
+    expect(result.settings.customFragmentTypes).toEqual([])
   })
 
   it('accepts full story metadata', () => {
@@ -121,6 +122,28 @@ describe('StoryMetaSchema', () => {
     }
     const result = StoryMetaSchema.parse(full)
     expect(result.settings.outputFormat).toBe('plaintext')
+  })
+
+  it('accepts custom fragment type settings', () => {
+    const result = StoryMetaSchema.parse({
+      ...validStory,
+      settings: {
+        customFragmentTypes: [{
+          type: 'location',
+          name: 'Locations',
+          description: 'Places and geography',
+          icon: 'MapPin',
+          showInSidebar: true,
+        }],
+      },
+    })
+
+    expect(result.settings.customFragmentTypes[0]).toMatchObject({
+      type: 'location',
+      name: 'Locations',
+      icon: 'MapPin',
+      showInSidebar: true,
+    })
   })
 })
 
