@@ -19,6 +19,10 @@ export const librarian = {
       method: 'POST',
       body: JSON.stringify({ fragmentId }),
     }),
+  resummarize: (storyId: string) =>
+    apiFetch<{ ok: boolean; summaryFragments: number }>(`/stories/${storyId}/librarian/resummarize`, {
+      method: 'POST',
+    }),
   listAnalyses: (storyId: string) =>
     apiFetch<LibrarianAnalysisSummary[]>(`/stories/${storyId}/librarian/analyses`),
   listAgentRuns: (storyId: string) =>
