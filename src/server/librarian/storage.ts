@@ -378,11 +378,15 @@ export async function listAnalyses(
 }
 
 /**
- * Like listAnalyses, but excludes analyses for prose fragments that are no
- * longer the active variation in the prose chain (superseded regenerate/
- * refine variations). listAnalyses itself stays unfiltered — it's the
- * historical record rebuildAnalysisIndex relies on — this is the "what's
- * current" view for UI surfaces like the librarian Story tab.
+ * Like listAnalyses, but (a) excludes analyses for prose fragments that are
+ * no longer the active variation in the prose chain (superseded regenerate/
+ * refine variations), and (b) collapses each remaining fragment down to its
+ * single latest analysis — a fragment re-analyzed more than once while still
+ * active (an in-place edit re-triggering analysis, a manual re-run) would
+ * otherwise show every historical analysis as a separate card. listAnalyses
+ * itself stays unfiltered/undeduped — it's the historical record
+ * rebuildAnalysisIndex relies on — this is the "what's current" view for UI
+ * surfaces like the librarian Story tab.
  */
 export async function listActiveAnalyses(
   dataDir: string,
@@ -393,7 +397,8 @@ export async function listActiveAnalyses(
     getActiveProseIds(dataDir, storyId),
   ])
   const active = new Set(activeIds)
-  return summaries.filter((s) => active.has(s.fragmentId))
+  const latestByFragment = selectLatestAnalysesByFragment(summaries)
+  return summaries.filter((s) => active.has(s.fragmentId) && latestByFragment.get(s.fragmentId)?.id === s.id)
 }
 
 /**

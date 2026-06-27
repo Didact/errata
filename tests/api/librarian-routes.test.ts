@@ -136,14 +136,19 @@ describe('librarian API routes', () => {
     })
 
     it('returns analyses sorted newest first', async () => {
-      // listActiveAnalyses scopes to fragments active in the prose chain.
+      // listActiveAnalyses scopes to fragments active in the prose chain, and
+      // collapses repeats per fragment to the latest — use two distinct
+      // active fragments so this test exercises ordering, not dedup.
       await addProseSection(dataDir, storyId, 'pr-0001')
+      await addProseSection(dataDir, storyId, 'pr-0002')
       await saveAnalysis(dataDir, storyId, makeAnalysis({
         id: 'analysis-old',
+        fragmentId: 'pr-0001',
         createdAt: '2025-01-01T00:00:00.000Z',
       }))
       await saveAnalysis(dataDir, storyId, makeAnalysis({
         id: 'analysis-new',
+        fragmentId: 'pr-0002',
         createdAt: '2025-01-02T00:00:00.000Z',
       }))
 
