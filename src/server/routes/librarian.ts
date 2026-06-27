@@ -9,7 +9,7 @@ import { createSSEStream } from '../librarian/analysis-stream'
 import { createAgentInstance, listAgentRuns } from '../agents'
 import {
   getActiveState as getLibrarianState,
-  listAnalyses as listLibrarianAnalyses,
+  listActiveAnalyses as listLibrarianAnalyses,
   getAnalysis as getLibrarianAnalysis,
   saveAnalysis as saveLibrarianAnalysis,
   getChatHistory as getLibrarianChatHistory,

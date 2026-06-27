@@ -378,6 +378,25 @@ export async function listAnalyses(
 }
 
 /**
+ * Like listAnalyses, but excludes analyses for prose fragments that are no
+ * longer the active variation in the prose chain (superseded regenerate/
+ * refine variations). listAnalyses itself stays unfiltered — it's the
+ * historical record rebuildAnalysisIndex relies on — this is the "what's
+ * current" view for UI surfaces like the librarian Story tab.
+ */
+export async function listActiveAnalyses(
+  dataDir: string,
+  storyId: string,
+): Promise<LibrarianAnalysisSummary[]> {
+  const [summaries, activeIds] = await Promise.all([
+    listAnalyses(dataDir, storyId),
+    getActiveProseIds(dataDir, storyId),
+  ])
+  const active = new Set(activeIds)
+  return summaries.filter((s) => active.has(s.fragmentId))
+}
+
+/**
  * Derive recentMentions/timeline from the analysis index rather than trusting
  * an incrementally-mutated copy. The index already holds exactly one (latest)
  * analysis per fragment ID, so re-analyzing a fragment (e.g. after an in-place

@@ -136,6 +136,8 @@ describe('librarian API routes', () => {
     })
 
     it('returns analyses sorted newest first', async () => {
+      // listActiveAnalyses scopes to fragments active in the prose chain.
+      await addProseSection(dataDir, storyId, 'pr-0001')
       await saveAnalysis(dataDir, storyId, makeAnalysis({
         id: 'analysis-old',
         createdAt: '2025-01-01T00:00:00.000Z',

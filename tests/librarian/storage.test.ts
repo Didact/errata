@@ -9,6 +9,7 @@ import {
   saveAnalysis,
   getAnalysis,
   listAnalyses,
+  listActiveAnalyses,
   getState,
   getActiveState,
   saveState,
@@ -153,6 +154,30 @@ describe('librarian storage', () => {
 
       const latest = await getLatestAnalysisIdsByFragment(dataDir, storyId)
       expect(latest.get('pr-0001')).toBe('analysis-b')
+    })
+
+    it('listActiveAnalyses excludes analyses for superseded prose variations', async () => {
+      await addProseSection(dataDir, storyId, 'pr-old')
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-old',
+        fragmentId: 'pr-old',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      }))
+
+      // Regenerate: a new variation becomes active, pr-old stays in the chain but inactive.
+      await addProseVariation(dataDir, storyId, 0, 'pr-new')
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-new',
+        fragmentId: 'pr-new',
+        createdAt: '2025-01-02T00:00:00.000Z',
+      }))
+
+      const active = await listActiveAnalyses(dataDir, storyId)
+      expect(active.map((a) => a.id)).toEqual(['analysis-new'])
+
+      // listAnalyses (unfiltered) still has both — history isn't destroyed.
+      const all = await listAnalyses(dataDir, storyId)
+      expect(all.map((a) => a.id).sort()).toEqual(['analysis-new', 'analysis-old'].sort())
     })
   })
 
