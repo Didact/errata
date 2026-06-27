@@ -179,6 +179,26 @@ describe('librarian storage', () => {
       const all = await listAnalyses(dataDir, storyId)
       expect(all.map((a) => a.id).sort()).toEqual(['analysis-new', 'analysis-old'].sort())
     })
+
+    it('listActiveAnalyses collapses multiple re-analyses of the same active fragment to the latest', async () => {
+      // Same fragment ID re-analyzed twice while still active (e.g. an
+      // in-place edit re-triggering analysis, or a manual re-run) should not
+      // show up as two separate cards.
+      await addProseSection(dataDir, storyId, 'pr-0001')
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-first',
+        fragmentId: 'pr-0001',
+        createdAt: '2025-01-01T00:00:00.000Z',
+      }))
+      await saveAnalysis(dataDir, storyId, makeAnalysis({
+        id: 'analysis-second',
+        fragmentId: 'pr-0001',
+        createdAt: '2025-01-02T00:00:00.000Z',
+      }))
+
+      const active = await listActiveAnalyses(dataDir, storyId)
+      expect(active.map((a) => a.id)).toEqual(['analysis-second'])
+    })
   })
 
   describe('state persistence', () => {
