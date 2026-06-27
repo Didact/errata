@@ -356,26 +356,15 @@ async function runLibrarianInner(
     }
   }
 
-  // Update librarian state
+  // Update librarian state. recentMentions/timeline are derived from the
+  // analysis index on read (see librarian/storage.ts) — only the scalar
+  // watermark fields are actually persisted here.
   requestLogger.debug('Updating librarian state...')
-  const updatedMentions = { ...state.recentMentions }
-  for (const charId of mentionedCharacterIds) {
-    if (!updatedMentions[charId]) {
-      updatedMentions[charId] = []
-    }
-    updatedMentions[charId].push(fragmentId)
-  }
-
-  const updatedTimeline = [...state.timeline]
-  for (const event of analysis.timelineEvents) {
-    updatedTimeline.push({ event: event.event, fragmentId })
-  }
-
   const updatedState = {
     lastAnalyzedFragmentId: fragmentId,
     summarizedUpTo: state.summarizedUpTo ?? null,
-    recentMentions: updatedMentions,
-    timeline: updatedTimeline,
+    recentMentions: state.recentMentions,
+    timeline: state.timeline,
   }
 
   // Save analysis first (with summaryUpdate preserved for deferred application)

@@ -8,7 +8,7 @@ import { getLibrarianRuntimeStatus, triggerLibrarian } from '../librarian/schedu
 import { createSSEStream } from '../librarian/analysis-stream'
 import { createAgentInstance, listAgentRuns } from '../agents'
 import {
-  getState as getLibrarianState,
+  getActiveState as getLibrarianState,
   listAnalyses as listLibrarianAnalyses,
   getAnalysis as getLibrarianAnalysis,
   saveAnalysis as saveLibrarianAnalysis,

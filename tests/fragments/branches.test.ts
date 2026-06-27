@@ -512,26 +512,47 @@ describe('branches', () => {
       await createFragment(dataDir, TEST_STORY_ID, makeFragment('pr-bakite', 'Hello'))
       await addProseSection(dataDir, TEST_STORY_ID, 'pr-bakite')
 
-      // Save initial librarian state on main
+      // Save initial librarian analysis on main (recentMentions/timeline are
+      // derived from analyses, not round-tripped through saveState)
+      await saveAnalysis(dataDir, TEST_STORY_ID, {
+        id: 'analysis-main',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        fragmentId: 'pr-bakite',
+        summaryUpdate: 'Start.',
+        mentionedCharacters: [],
+        contradictions: [],
+        fragmentSuggestions: [],
+        timelineEvents: [{ event: 'Start', position: 'during' }],
+      })
       await saveState(dataDir, TEST_STORY_ID, {
         lastAnalyzedFragmentId: 'pr-bakite',
         summarizedUpTo: null,
         recentMentions: {},
-        timeline: [{ event: 'Start', fragmentId: 'pr-bakite' }],
+        timeline: [],
       })
 
       // Branch from main
       await createBranch(dataDir, TEST_STORY_ID, 'Alt', 'main')
 
-      // Modify librarian state in the branch
+      // Re-analyze in the branch with new facts (e.g. a re-edit + re-analysis)
+      await saveAnalysis(dataDir, TEST_STORY_ID, {
+        id: 'analysis-branch',
+        createdAt: '2025-01-02T00:00:00.000Z',
+        fragmentId: 'pr-bakite',
+        summaryUpdate: 'Start, then Bob appears.',
+        mentionedCharacters: ['ch-bob'],
+        contradictions: [],
+        fragmentSuggestions: [],
+        timelineEvents: [
+          { event: 'Start', position: 'during' },
+          { event: 'Bob appears', position: 'after' },
+        ],
+      })
       await saveState(dataDir, TEST_STORY_ID, {
         lastAnalyzedFragmentId: 'pr-bakite',
         summarizedUpTo: 'pr-bakite',
-        recentMentions: { 'ch-bob': ['pr-bakite'] },
-        timeline: [
-          { event: 'Start', fragmentId: 'pr-bakite' },
-          { event: 'Bob appears', fragmentId: 'pr-bakite' },
-        ],
+        recentMentions: {},
+        timeline: [],
       })
 
       // Verify branch has modified state
