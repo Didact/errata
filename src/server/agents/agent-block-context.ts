@@ -47,4 +47,11 @@ export interface AgentBlockContext {
 
   // Plugin tools
   pluginToolDescriptions?: Array<{ name: string; description: string }>
+
+  // Librarian chat continuation (resuming an incomplete prior turn)
+  continuation?: {
+    plan: string[]
+    completedSteps: string[]
+    reasoning: string
+  }
 }

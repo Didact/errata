@@ -501,10 +501,20 @@ export async function saveState(
 
 // --- Chat history ---
 
+export interface ChatHistoryToolCall {
+  toolName: string
+  args: Record<string, unknown>
+  result?: unknown
+}
+
 export interface ChatHistoryMessage {
   role: 'user' | 'assistant'
   content: string
   reasoning?: string
+  toolCalls?: ChatHistoryToolCall[]
+  plan?: string[]
+  completedSteps?: string[]
+  incomplete?: boolean
 }
 
 export interface ChatHistory {

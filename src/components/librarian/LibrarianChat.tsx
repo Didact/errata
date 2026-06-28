@@ -69,15 +69,18 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
   useEffect(() => {
     if (chatHistory && !loaded && !isStreaming) {
       if (chatHistory.messages.length > 0) {
-        setMessages(chatHistory.messages.map(m => {
+        setMessages(chatHistory.messages.map((m): ChatMessage => {
           if (m.role === 'assistant') {
             return {
               role: 'assistant' as const,
               content: m.content,
               ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+              ...(m.toolCalls?.length
+                ? { toolCalls: m.toolCalls.map((tc, i) => ({ id: `${i}`, toolName: tc.toolName, args: tc.args, result: tc.result })) }
+                : {}),
             }
           }
-          return m
+          return { role: 'user' as const, content: m.content }
         }))
       }
       setLoaded(true)
@@ -133,6 +136,8 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
     setMessages([...updatedMessages, emptyAssistant])
     setIsStreaming(true)
 
+    let currentAssistant: AssistantMessage = { role: 'assistant', content: '' }
+
     try {
       // Send only text content for the API (history doesn't include tool calls)
       const apiMessages = updatedMessages.map(m => ({
@@ -144,8 +149,6 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
         ? await api.librarian.conversationChat(storyId, conversationId, apiMessages)
         : await api.librarian.chat(storyId, apiMessages)
       const reader = stream.getReader()
-
-      let currentAssistant: AssistantMessage = { role: 'assistant', content: '' }
 
       while (true) {
         const { done, value } = await reader.read()
@@ -181,6 +184,16 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
             }
             break
           }
+          case 'tool-error': {
+            const calls = currentAssistant.toolCalls ?? []
+            currentAssistant = {
+              ...currentAssistant,
+              toolCalls: calls.map(tc =>
+                tc.id === event.id ? { ...tc, error: event.error } : tc
+              ),
+            }
+            break
+          }
           case 'finish':
             // Stream done
             break
@@ -199,9 +212,15 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
         await queryClient.invalidateQueries({ queryKey: ['librarian-conversations', storyId] })
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Chat failed')
-      // Remove the empty assistant message on error
-      setMessages(updatedMessages)
+      const message = err instanceof Error ? err.message : 'Chat failed'
+      setError(message)
+      // Keep whatever text/reasoning/tool calls already streamed through (and
+      // already executed server-side) instead of discarding the whole turn —
+      // those tool calls may have already mutated fragments.
+      const hasProgress = currentAssistant.content || currentAssistant.reasoning || currentAssistant.toolCalls?.length
+      setMessages(hasProgress
+        ? [...updatedMessages, { ...currentAssistant, error: message }]
+        : updatedMessages)
     } finally {
       setIsStreaming(false)
       textareaRef.current?.focus()

@@ -25,6 +25,40 @@ import {
 import { applyFragmentSuggestion } from '../librarian/suggestions'
 import { createLogger } from '../logging'
 import { encodeStream } from './encode-stream'
+import type { ChatHistory, ChatHistoryMessage } from '../librarian/storage'
+import type { ChatContinuation } from '../librarian/chat'
+import type { AgentStreamCompletion } from '../agents/stream-types'
+
+function buildContinuation(history: ChatHistory): ChatContinuation | undefined {
+  const last = history.messages[history.messages.length - 1]
+  if (last?.role === 'assistant' && last.incomplete && last.plan?.length) {
+    return {
+      plan: last.plan,
+      completedSteps: last.completedSteps ?? [],
+      reasoning: last.reasoning ?? '',
+    }
+  }
+  return undefined
+}
+
+function deriveChatTurnFields(
+  result: AgentStreamCompletion,
+  maxSteps: number,
+): Pick<ChatHistoryMessage, 'toolCalls' | 'plan' | 'completedSteps' | 'incomplete'> {
+  const planCall = result.toolCalls.find(tc => tc.toolName === 'planEdits')
+  const plan = planCall ? (planCall.args.steps as string[] | undefined) : undefined
+  const completedSteps = result.toolCalls
+    .filter(tc => tc.toolName !== 'planEdits')
+    .map(tc => `${tc.toolName}(${JSON.stringify(tc.args)})`)
+  const incomplete = Boolean(plan?.length) && result.stepCount >= maxSteps
+
+  return {
+    toolCalls: result.toolCalls,
+    ...(plan ? { plan } : {}),
+    ...(completedSteps.length > 0 ? { completedSteps } : {}),
+    ...(incomplete ? { incomplete: true } : {}),
+  }
+}
 
 export function librarianRoutes(dataDir: string) {
   const logger = createLogger('api:librarian', { dataDir })
@@ -407,10 +441,15 @@ export function librarianRoutes(dataDir: string) {
 
       let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
+        const maxSteps = story.settings.maxSteps ?? 10
+        const priorHistory = await getLibrarianChatHistory(dataDir, params.storyId)
+        const continuation = buildContinuation(priorHistory)
+
         agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
         const { eventStream, completion } = await agent.execute({
           messages: body.messages,
-          maxSteps: story.settings.maxSteps ?? 10,
+          maxSteps,
+          continuation,
         })
 
         // Persist chat history after completion (in background)
@@ -426,6 +465,7 @@ export function librarianRoutes(dataDir: string) {
               role: 'assistant' as const,
               content: result.text,
               ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+              ...deriveChatTurnFields(result, maxSteps),
             },
           ]
           await saveLibrarianChatHistory(dataDir, params.storyId, fullHistory)
@@ -484,10 +524,15 @@ export function librarianRoutes(dataDir: string) {
 
       let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
+        const maxSteps = story.settings.maxSteps ?? 10
+        const priorHistory = await getConversationHistory(dataDir, params.storyId, params.conversationId)
+        const continuation = buildContinuation(priorHistory)
+
         agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
         const { eventStream, completion } = await agent.execute({
           messages: body.messages,
-          maxSteps: story.settings.maxSteps ?? 10,
+          maxSteps,
+          continuation,
         })
 
         completion.then(async (result) => {
@@ -502,6 +547,7 @@ export function librarianRoutes(dataDir: string) {
               role: 'assistant' as const,
               content: result.text,
               ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+              ...deriveChatTurnFields(result, maxSteps),
             },
           ]
           await saveConversationHistory(dataDir, params.storyId, params.conversationId, fullHistory)
