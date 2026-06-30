@@ -17,7 +17,7 @@ import {
 } from '../../src/server/fragments/branches'
 import { createStory, createFragment, getFragment, listFragments } from '../../src/server/fragments/storage'
 import { getProseChain, addProseSection } from '../../src/server/fragments/prose-chain'
-import { saveState, getState, saveAnalysis, getAnalysis, saveChatHistory, getChatHistory } from '../../src/server/librarian/storage'
+import { saveState, getState, saveAnalysis, getAnalysis, appendChatMessage, getChatHistory } from '../../src/server/librarian/storage'
 import type { LibrarianAnalysis, LibrarianState } from '../../src/server/librarian/storage'
 import type { StoryMeta, Fragment } from '../../src/server/fragments/schema'
 
@@ -405,10 +405,8 @@ describe('branches', () => {
       await saveAnalysis(dataDir, TEST_STORY_ID, analysis)
 
       // Save chat history on main
-      await saveChatHistory(dataDir, TEST_STORY_ID, [
-        { role: 'user', content: 'Who is Alice?' },
-        { role: 'assistant', content: 'Alice is the protagonist.' },
-      ])
+      await appendChatMessage(dataDir, TEST_STORY_ID, { role: 'user', content: 'Who is Alice?' })
+      await appendChatMessage(dataDir, TEST_STORY_ID, { role: 'assistant', content: 'Alice is the protagonist.' })
 
       // Create a branch — should copy all librarian data
       await createBranch(dataDir, TEST_STORY_ID, 'Alt Timeline', 'main')

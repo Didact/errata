@@ -13,13 +13,13 @@ import {
   getAnalysis as getLibrarianAnalysis,
   saveAnalysis as saveLibrarianAnalysis,
   getChatHistory as getLibrarianChatHistory,
-  saveChatHistory as saveLibrarianChatHistory,
+  appendChatMessage,
   clearChatHistory as clearLibrarianChatHistory,
   listConversations,
   createConversation,
   deleteConversation,
   getConversationHistory,
-  saveConversationHistory,
+  appendConversationMessage,
   getLatestAnalysisIdsByFragment,
 } from '../librarian/storage'
 import { applyFragmentSuggestion } from '../librarian/suggestions'
@@ -426,7 +426,7 @@ export function librarianRoutes(dataDir: string) {
 
     .post('/stories/:storyId/librarian/chat', async ({ params, body, set }) => {
       const requestLogger = logger.child({ storyId: params.storyId })
-      requestLogger.info('Librarian chat request', { messageCount: body.messages.length })
+      requestLogger.info('Librarian chat request')
 
       const story = await getStory(dataDir, params.storyId)
       if (!story) {
@@ -434,9 +434,10 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'Story not found' }
       }
 
-      if (!body.messages.length) {
+      const text = body.message.trim()
+      if (!text) {
         set.status = 422
-        return { error: 'At least one message is required' }
+        return { error: 'message is required' }
       }
 
       let agent: ReturnType<typeof createAgentInstance> | undefined
@@ -445,9 +446,13 @@ export function librarianRoutes(dataDir: string) {
         const priorHistory = await getLibrarianChatHistory(dataDir, params.storyId)
         const continuation = buildContinuation(priorHistory)
 
+        const userMsg: ChatHistoryMessage = { role: 'user', content: text }
+        const historyAfterUser = await appendChatMessage(dataDir, params.storyId, userMsg)
+        const agentMessages = historyAfterUser.messages.map(m => ({ role: m.role, content: m.content }))
+
         agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
         const { eventStream, completion } = await agent.execute({
-          messages: body.messages,
+          messages: agentMessages,
           maxSteps,
           continuation,
         })
@@ -459,16 +464,13 @@ export function librarianRoutes(dataDir: string) {
             finishReason: result.finishReason,
             toolCallCount: result.toolCalls.length,
           })
-          const fullHistory = [
-            ...body.messages,
-            {
-              role: 'assistant' as const,
-              content: result.text,
-              ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-              ...deriveChatTurnFields(result, maxSteps),
-            },
-          ]
-          await saveLibrarianChatHistory(dataDir, params.storyId, fullHistory)
+          const assistantMsg: ChatHistoryMessage = {
+            role: 'assistant',
+            content: result.text,
+            ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+            ...deriveChatTurnFields(result, maxSteps),
+          }
+          await appendChatMessage(dataDir, params.storyId, assistantMsg)
         }).catch((err) => {
           requestLogger.error('Librarian chat completion error', { error: err instanceof Error ? err.message : String(err) })
         })
@@ -484,10 +486,7 @@ export function librarianRoutes(dataDir: string) {
       }
     }, {
       body: t.Object({
-        messages: t.Array(t.Object({
-          role: t.Union([t.Literal('user'), t.Literal('assistant')]),
-          content: t.String(),
-        })),
+        message: t.String({ minLength: 1 }),
       }),
       detail: { summary: 'Chat with the librarian (streaming NDJSON)' },
     })
@@ -516,11 +515,13 @@ export function librarianRoutes(dataDir: string) {
 
     .post('/stories/:storyId/librarian/conversations/:conversationId/chat', async ({ params, body, set }) => {
       const requestLogger = logger.child({ storyId: params.storyId, extra: { conversationId: params.conversationId } })
-      requestLogger.info('Conversation chat request', { messageCount: body.messages.length })
+      requestLogger.info('Conversation chat request')
 
       const story = await getStory(dataDir, params.storyId)
       if (!story) { set.status = 404; return { error: 'Story not found' } }
-      if (!body.messages.length) { set.status = 422; return { error: 'At least one message is required' } }
+
+      const text = body.message.trim()
+      if (!text) { set.status = 422; return { error: 'message is required' } }
 
       let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
@@ -528,9 +529,13 @@ export function librarianRoutes(dataDir: string) {
         const priorHistory = await getConversationHistory(dataDir, params.storyId, params.conversationId)
         const continuation = buildContinuation(priorHistory)
 
+        const userMsg: ChatHistoryMessage = { role: 'user', content: text }
+        const historyAfterUser = await appendConversationMessage(dataDir, params.storyId, params.conversationId, userMsg)
+        const agentMessages = historyAfterUser.messages.map(m => ({ role: m.role, content: m.content }))
+
         agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
         const { eventStream, completion } = await agent.execute({
-          messages: body.messages,
+          messages: agentMessages,
           maxSteps,
           continuation,
         })
@@ -541,16 +546,13 @@ export function librarianRoutes(dataDir: string) {
             finishReason: result.finishReason,
             toolCallCount: result.toolCalls.length,
           })
-          const fullHistory = [
-            ...body.messages,
-            {
-              role: 'assistant' as const,
-              content: result.text,
-              ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-              ...deriveChatTurnFields(result, maxSteps),
-            },
-          ]
-          await saveConversationHistory(dataDir, params.storyId, params.conversationId, fullHistory)
+          const assistantMsg: ChatHistoryMessage = {
+            role: 'assistant',
+            content: result.text,
+            ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+            ...deriveChatTurnFields(result, maxSteps),
+          }
+          await appendConversationMessage(dataDir, params.storyId, params.conversationId, assistantMsg)
         }).catch((err) => {
           requestLogger.error('Conversation chat completion error', { error: err instanceof Error ? err.message : String(err) })
         })
@@ -566,10 +568,7 @@ export function librarianRoutes(dataDir: string) {
       }
     }, {
       body: t.Object({
-        messages: t.Array(t.Object({
-          role: t.Union([t.Literal('user'), t.Literal('assistant')]),
-          content: t.String(),
-        })),
+        message: t.String({ minLength: 1 }),
       }),
       detail: { summary: 'Chat in a conversation (streaming NDJSON)' },
     })

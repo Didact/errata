@@ -57,8 +57,8 @@ export const librarian = {
     contextAfter: options?.contextAfter,
     instruction: options?.instruction,
   }),
-  chat: (storyId: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>) =>
-    fetchEventStream(`/stories/${storyId}/librarian/chat`, { messages }),
+  chat: (storyId: string, message: string) =>
+    fetchEventStream(`/stories/${storyId}/librarian/chat`, { message }),
   getChatHistory: (storyId: string) =>
     apiFetch<ChatHistory>(`/stories/${storyId}/librarian/chat`),
   clearChatHistory: (storyId: string) =>
@@ -79,6 +79,6 @@ export const librarian = {
     }),
   getConversationHistory: (storyId: string, conversationId: string) =>
     apiFetch<ChatHistory>(`/stories/${storyId}/librarian/conversations/${conversationId}/chat`),
-  conversationChat: (storyId: string, conversationId: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>) =>
-    fetchEventStream(`/stories/${storyId}/librarian/conversations/${conversationId}/chat`, { messages }),
+  conversationChat: (storyId: string, conversationId: string, message: string) =>
+    fetchEventStream(`/stories/${storyId}/librarian/conversations/${conversationId}/chat`, { message }),
 }

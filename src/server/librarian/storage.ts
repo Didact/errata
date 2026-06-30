@@ -12,6 +12,12 @@ function withIndexLock<T>(storyId: string, fn: () => Promise<T>): Promise<T> {
   return withKeyLock(`librarian-index:${storyId}`, fn)
 }
 
+/** Serializes read-modify-write of a chat (or conversation) history file against concurrent appends. */
+function withChatLock<T>(storyId: string, conversationId: string | null, fn: () => Promise<T>): Promise<T> {
+  const key = conversationId ? `librarian-chat:${storyId}:${conversationId}` : `librarian-chat:${storyId}:legacy`
+  return withKeyLock(key, fn)
+}
+
 // --- Types ---
 
 export interface LibrarianAnalysis {
@@ -539,18 +545,22 @@ export async function getChatHistory(
   return JSON.parse(raw) as ChatHistory
 }
 
-export async function saveChatHistory(
+export async function appendChatMessage(
   dataDir: string,
   storyId: string,
-  messages: ChatHistoryMessage[],
-): Promise<void> {
-  const dir = await librarianDir(dataDir, storyId)
-  await mkdir(dir, { recursive: true })
-  const history: ChatHistory = {
-    messages,
-    updatedAt: new Date().toISOString(),
-  }
-  await writeJsonAtomic(await chatHistoryPath(dataDir, storyId), history)
+  message: ChatHistoryMessage,
+): Promise<ChatHistory> {
+  return withChatLock(storyId, null, async () => {
+    const dir = await librarianDir(dataDir, storyId)
+    await mkdir(dir, { recursive: true })
+    const current = await getChatHistory(dataDir, storyId)
+    const history: ChatHistory = {
+      messages: [...current.messages, message],
+      updatedAt: new Date().toISOString(),
+    }
+    await writeJsonAtomic(await chatHistoryPath(dataDir, storyId), history)
+    return history
+  })
 }
 
 export async function clearChatHistory(
@@ -606,17 +616,19 @@ export async function listConversations(dataDir: string, storyId: string): Promi
 }
 
 export async function createConversation(dataDir: string, storyId: string, title: string): Promise<ConversationMeta> {
-  const index = await readConversationsIndex(dataDir, storyId)
-  const now = new Date().toISOString()
-  const conversation: ConversationMeta = {
-    id: generateConversationId(),
-    title,
-    createdAt: now,
-    updatedAt: now,
-  }
-  index.conversations.push(conversation)
-  await writeConversationsIndex(dataDir, storyId, index)
-  return conversation
+  return withIndexLock(storyId, async () => {
+    const index = await readConversationsIndex(dataDir, storyId)
+    const now = new Date().toISOString()
+    const conversation: ConversationMeta = {
+      id: generateConversationId(),
+      title,
+      createdAt: now,
+      updatedAt: now,
+    }
+    index.conversations.push(conversation)
+    await writeConversationsIndex(dataDir, storyId, index)
+    return conversation
+  })
 }
 
 export async function updateConversationTitle(
@@ -625,21 +637,27 @@ export async function updateConversationTitle(
   conversationId: string,
   title: string,
 ): Promise<ConversationMeta | null> {
-  const index = await readConversationsIndex(dataDir, storyId)
-  const conv = index.conversations.find(c => c.id === conversationId)
-  if (!conv) return null
-  conv.title = title
-  conv.updatedAt = new Date().toISOString()
-  await writeConversationsIndex(dataDir, storyId, index)
-  return conv
+  return withIndexLock(storyId, async () => {
+    const index = await readConversationsIndex(dataDir, storyId)
+    const conv = index.conversations.find(c => c.id === conversationId)
+    if (!conv) return null
+    conv.title = title
+    conv.updatedAt = new Date().toISOString()
+    await writeConversationsIndex(dataDir, storyId, index)
+    return conv
+  })
 }
 
 export async function deleteConversation(dataDir: string, storyId: string, conversationId: string): Promise<boolean> {
-  const index = await readConversationsIndex(dataDir, storyId)
-  const idx = index.conversations.findIndex(c => c.id === conversationId)
-  if (idx === -1) return false
-  index.conversations.splice(idx, 1)
-  await writeConversationsIndex(dataDir, storyId, index)
+  const deleted = await withIndexLock(storyId, async () => {
+    const index = await readConversationsIndex(dataDir, storyId)
+    const idx = index.conversations.findIndex(c => c.id === conversationId)
+    if (idx === -1) return false
+    index.conversations.splice(idx, 1)
+    await writeConversationsIndex(dataDir, storyId, index)
+    return true
+  })
+  if (!deleted) return false
   // Delete history file
   const dir = await librarianDir(dataDir, storyId)
   const historyFile = conversationHistoryPath(dir, conversationId)
@@ -659,26 +677,34 @@ export async function getConversationHistory(
   return JSON.parse(raw) as ChatHistory
 }
 
-export async function saveConversationHistory(
+export async function appendConversationMessage(
   dataDir: string,
   storyId: string,
   conversationId: string,
-  messages: ChatHistoryMessage[],
-): Promise<void> {
-  const dir = await librarianDir(dataDir, storyId)
-  await mkdir(dir, { recursive: true })
-  const history: ChatHistory = { messages, updatedAt: new Date().toISOString() }
-  await writeJsonAtomic(conversationHistoryPath(dir, conversationId), history)
-  // Update conversation timestamp
-  const index = await readConversationsIndex(dataDir, storyId)
-  const conv = index.conversations.find(c => c.id === conversationId)
-  if (conv) {
-    conv.updatedAt = history.updatedAt
-    // Auto-title from first user message if still default
-    if (conv.title === 'New chat' && messages.length > 0) {
-      const firstUser = messages.find(m => m.role === 'user')
-      if (firstUser) conv.title = firstUser.content.slice(0, 60).trim() || 'New chat'
+  message: ChatHistoryMessage,
+): Promise<ChatHistory> {
+  return withChatLock(storyId, conversationId, async () => {
+    const dir = await librarianDir(dataDir, storyId)
+    await mkdir(dir, { recursive: true })
+    const current = await getConversationHistory(dataDir, storyId, conversationId)
+    const history: ChatHistory = {
+      messages: [...current.messages, message],
+      updatedAt: new Date().toISOString(),
     }
-    await writeConversationsIndex(dataDir, storyId, index)
-  }
+    await writeJsonAtomic(conversationHistoryPath(dir, conversationId), history)
+
+    // Index touch (title/updatedAt) — serialized against conversation CRUD via withIndexLock.
+    await withIndexLock(storyId, async () => {
+      const index = await readConversationsIndex(dataDir, storyId)
+      const conv = index.conversations.find(c => c.id === conversationId)
+      if (conv) {
+        conv.updatedAt = history.updatedAt
+        if (conv.title === 'New chat' && message.role === 'user') {
+          conv.title = message.content.slice(0, 60).trim() || 'New chat'
+        }
+        await writeConversationsIndex(dataDir, storyId, index)
+      }
+    })
+    return history
+  })
 }
