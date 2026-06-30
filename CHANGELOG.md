@@ -3,6 +3,24 @@
 All notable changes to Errata are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## [1.10.2] — 2026-06-28
+
+### Fixed
+- **Librarian chat no longer re-derives its analysis from scratch every
+  turn.** Reasoning was discarded between messages, so multi-step edit
+  requests that hit the step limit just stopped mid-task with no way to
+  continue. The agent now declares its plan before reasoning about edit
+  content, and an incomplete turn's plan/reasoning are persisted and fed
+  back in as continuation context on the next message.
+- **A failed tool call no longer wipes out a turn's already-successful
+  edits from the chat view.** Tool calls are now persisted to chat history
+  (so they survive a reload), and a stream error keeps whatever already
+  executed instead of discarding the whole in-progress turn.
+- Isolated corrupt analysis files, deduped the analysis list to one card per
+  fragment, scoped the Story tab's analysis list to active prose
+  variations, and made deferred summarization idempotent (added a
+  resummarize tool).
+
 ## [1.10.1] — 2026-06-26
 
 ### Fixed

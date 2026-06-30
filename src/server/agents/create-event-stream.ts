@@ -72,6 +72,18 @@ export function createEventStream(
               }
               break
             }
+            case 'tool-error': {
+              const toolCallId = p.toolCallId as string
+              const toolName = (p.toolName as string) ?? ''
+              const errVal = p.error
+              event = {
+                type: 'tool-error',
+                id: toolCallId,
+                toolName,
+                error: errVal instanceof Error ? errVal.message : String(errVal),
+              }
+              break
+            }
             // `finish-step` fires once per LLM step; `finish` fires once for the
             // whole generation. Count steps, capture the final reason.
             case 'finish-step':

@@ -4,6 +4,7 @@ export type AgentStreamEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; id: string; toolName: string; args: Record<string, unknown> }
   | { type: 'tool-result'; id: string; toolName: string; result: unknown }
+  | { type: 'tool-error'; id: string; toolName: string; error: string }
   | { type: 'finish'; finishReason: string; stepCount: number }
 
 export interface AgentStreamCompletion {

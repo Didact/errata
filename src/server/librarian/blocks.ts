@@ -181,18 +181,20 @@ Your tools:
 - reanalyzeFragment(fragmentId) — Re-run librarian analysis on a prose fragment. Updates the fragment's summary, detects mentions, flags contradictions, and suggests knowledge. Use when the author asks to re-examine or reanalyze a specific prose section.
 - optimizeCharacter(fragmentId, instructions?) — Optimize a character sheet using depth-focused writing methodology. Rewrites with causality, Egri dimensions, friction, and contrast.
 - inspectGeneration(fragmentId, aspect?) — Inspect the debug details behind a generated prose fragment: the model, the prompt/context it saw, the tools it called, token usage, reasoning, and the prewriter brief. aspect is one of summary (default), prompt, tools, prewriter, reasoning. Use to explain or diagnose why a passage was written the way it was.
+- planEdits(steps) — Call this FIRST, before reasoning about the content of any edit, whenever the author's request will require one or more edits. List each concrete action you intend to take (e.g. "update ch-bakumo's description to mention the time skip") as a short string. Do not reason deeply about the content of an edit until you've declared it here.
 
 Instructions:
 1. Your context includes a story summary and fragment summaries (IDs, names, descriptions) — not full content. Use getFragment(id) to read the full content of any fragment you need.
-2. For prose edits, first read the relevant prose fragment with getFragment, then use editProse(oldText, newText) — it scans active prose automatically.
-3. For character/guideline/knowledge changes, use editFragment or updateFragment with the fragment ID.
-3b. When the author asks to add new lore/character/rules, use createFragment.
-4. When the author asks for sweeping changes (e.g. "update all characters to reflect the time skip"), use listFragments and getFragment to find relevant fragments, then update each one.
-5. Explain what you changed and why after making edits.
-6. Ask clarifying questions when the request is ambiguous.
-7. You can make multiple tool calls in sequence to accomplish complex tasks.
-8. Keep fragment descriptions within the 250 character limit.
-9. Be concise but thorough in your responses.
+2. If the request requires edits, call planEdits first with the list of actions you intend to take, before doing any deep reasoning about what those edits should contain.
+3. For prose edits, first read the relevant prose fragment with getFragment, then use editProse(oldText, newText) — it scans active prose automatically.
+4. For character/guideline/knowledge changes, use editFragment or updateFragment with the fragment ID.
+4b. When the author asks to add new lore/character/rules, use createFragment.
+5. When the author asks for sweeping changes (e.g. "update all characters to reflect the time skip"), use listFragments and getFragment to find relevant fragments, then update each one.
+6. Explain what you changed and why after making edits.
+7. Ask clarifying questions when the request is ambiguous.
+8. You can make multiple tool calls in sequence to accomplish complex tasks.
+9. Keep fragment descriptions within the 250 character limit.
+10. Be concise but thorough in your responses.
 
 Fragment ID prefixes: pr- (prose), ch- (character), gl- (guideline), kn- (knowledge).
 `
@@ -236,6 +238,30 @@ export function createLibrarianChatBlocks(ctx: AgentBlockContext): ContextBlock[
 
   const shortlist = shortlistBlock(ctx)
   if (shortlist) blocks.push(shortlist)
+
+  if (ctx.continuation) {
+    blocks.push({
+      id: 'continuation',
+      role: 'system',
+      content: [
+        '## Continuing an incomplete prior turn',
+        'You previously started this task but ran out of steps before finishing. Continue from here — do not restart your analysis from scratch.',
+        '',
+        'Your plan was:',
+        ...ctx.continuation.plan.map(s => `- ${s}`),
+        '',
+        'You already completed:',
+        ...(ctx.continuation.completedSteps.length > 0
+          ? ctx.continuation.completedSteps.map(s => `- ${s}`)
+          : ['(nothing yet)']),
+        '',
+        'Your reasoning so far:',
+        ctx.continuation.reasoning || '(none recorded)',
+      ].join('\n'),
+      order: 250,
+      source: 'builtin',
+    })
+  }
 
   return blocks
 }

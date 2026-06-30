@@ -236,7 +236,15 @@ export interface LibrarianAcceptSuggestionResponse {
 }
 
 export interface ChatHistory {
-  messages: Array<{ role: 'user' | 'assistant'; content: string; reasoning?: string }>
+  messages: Array<{
+    role: 'user' | 'assistant'
+    content: string
+    reasoning?: string
+    toolCalls?: Array<{ toolName: string; args: Record<string, unknown>; result?: unknown }>
+    plan?: string[]
+    completedSteps?: string[]
+    incomplete?: boolean
+  }>
   updatedAt: string
 }
 
@@ -457,6 +465,7 @@ export type ChatEvent =
   | { type: 'prewriter-reset' }
   | { type: 'tool-call'; id: string; toolName: string; args: Record<string, unknown> }
   | { type: 'tool-result'; id: string; toolName: string; result: unknown }
+  | { type: 'tool-error'; id: string; toolName: string; error: string }
   | { type: 'phase'; phase: string }
   | { type: 'finish'; finishReason: string; stepCount: number }
   | { type: 'prewriter-directions'; directions: SuggestionDirection[] }

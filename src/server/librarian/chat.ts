@@ -26,9 +26,16 @@ export interface ChatMessage {
   content: string
 }
 
+export interface ChatContinuation {
+  plan: string[]
+  completedSteps: string[]
+  reasoning: string
+}
+
 export interface ChatOptions {
   messages: ChatMessage[]
   maxSteps?: number
+  continuation?: ChatContinuation
 }
 
 export async function librarianChat(
@@ -140,7 +147,15 @@ async function librarianChatInner(
     },
   })
 
-  const allTools = { ...fragmentTools, ...pluginTools, reanalyzeFragment: reanalyzeFragmentTool, optimizeCharacter: optimizeCharacterTool, inspectGeneration: inspectGenerationTool }
+  const planEditsTool = tool({
+    description: 'Call this FIRST, before making any edits, to declare the concrete actions (tool calls) you intend to make to fulfill the request.',
+    inputSchema: z.object({
+      steps: z.array(z.string()).describe('Short descriptions of each action you intend to take, e.g. "update ch-bakumo description to mention the time skip"'),
+    }),
+    execute: async ({ steps }: { steps: string[] }) => ({ ok: true, steps }),
+  })
+
+  const allTools = { ...fragmentTools, ...pluginTools, reanalyzeFragment: reanalyzeFragmentTool, optimizeCharacter: optimizeCharacterTool, inspectGeneration: inspectGenerationTool, planEdits: planEditsTool }
 
   // Build plugin tool descriptions for the block context
   const pluginToolDescriptions = Object.entries(pluginTools).map(([name, def]) => ({
@@ -161,6 +176,7 @@ async function librarianChatInner(
     systemPromptFragments,
     pluginToolDescriptions,
     modelId,
+    continuation: opts.continuation,
   }
 
   // Compile context via block system

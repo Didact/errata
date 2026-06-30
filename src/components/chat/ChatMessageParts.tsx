@@ -8,6 +8,7 @@ export interface ToolCallInfo {
   toolName: string
   args: Record<string, unknown>
   result?: unknown
+  error?: string
 }
 
 export interface AssistantMessage {
@@ -15,6 +16,7 @@ export interface AssistantMessage {
   content: string
   reasoning?: string
   toolCalls?: ToolCallInfo[]
+  error?: string
 }
 
 export type ChatMessage =
@@ -32,6 +34,7 @@ export function ToolCallCard({ tc, defaultExpanded = false }: { tc: ToolCallInfo
     .join(', ')
 
   const hasResult = tc.result !== undefined
+  const hasError = Boolean(tc.error)
 
   return (
     <div className="my-1.5 rounded border border-border/40 bg-muted/20 text-[0.625rem]">
@@ -47,7 +50,12 @@ export function ToolCallCard({ tc, defaultExpanded = false }: { tc: ToolCallInfo
         {argSummary && (
           <span className="text-muted-foreground truncate">{argSummary}</span>
         )}
-        {hasResult && (
+        {hasError && (
+          <Badge variant="destructive" className="text-[0.5625rem] px-1 py-0 h-4 ml-auto shrink-0">
+            failed
+          </Badge>
+        )}
+        {!hasError && hasResult && (
           <Badge variant="secondary" className="text-[0.5625rem] px-1 py-0 h-4 ml-auto shrink-0">
             done
           </Badge>
@@ -61,6 +69,14 @@ export function ToolCallCard({ tc, defaultExpanded = false }: { tc: ToolCallInfo
               {JSON.stringify(args, null, 2)}
             </pre>
           </div>
+          {hasError && (
+            <div>
+              <div className="text-muted-foreground mb-0.5">Error</div>
+              <pre className="bg-destructive/10 text-destructive rounded px-1.5 py-1 font-mono text-[0.625rem] overflow-x-auto whitespace-pre-wrap break-all">
+                {tc.error}
+              </pre>
+            </div>
+          )}
           {hasResult && (
             <div>
               <div className="text-muted-foreground mb-0.5">Result</div>
@@ -121,6 +137,11 @@ export function AssistantMessageView({ msg, streaming }: { msg: AssistantMessage
       )}
       {streaming && !msg.content && !msg.reasoning && (
         <span className="inline-block w-0.5 h-[1em] bg-primary/60 animate-pulse align-text-bottom" />
+      )}
+      {!streaming && msg.error && (
+        <div className="mt-1.5 text-[0.625rem] text-destructive italic">
+          {msg.error}
+        </div>
       )}
     </div>
   )
