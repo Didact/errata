@@ -1,4 +1,4 @@
-import { tool, ToolLoopAgent, stepCountIs } from 'ai'
+import { tool, ToolLoopAgent, stepCountIs, type LanguageModel } from 'ai'
 import { z } from 'zod/v4'
 import { getModel } from '../llm/client'
 import { getFragment, getStory } from '../fragments/storage'
@@ -6,7 +6,7 @@ import { buildContextState } from '../llm/context-builder'
 import { createFragmentTools } from '../llm/tools'
 import { pluginRegistry } from '../plugins/registry'
 import { collectPluginTools } from '../plugins/tools'
-import { createLogger } from '../logging'
+import { createLogger, type Logger } from '../logging'
 import { consumeAgentStream } from '../agents/create-event-stream'
 import { compileAgentContext } from '../agents/compile-agent-context'
 import { createAgentInstance } from '../agents/agent-instance'
@@ -223,6 +223,109 @@ async function librarianChatInner(
 
   return {
     cancel: () => abortController.abort(),
-    run: (onEvent) => consumeAgentStream(result.fullStream, onEvent),
+    run: async (onEvent) => {
+      const completion = await consumeAgentStream(result.fullStream, onEvent)
+
+      // The tool loop can end *on* a tool call — the model spends its whole
+      // step budget applying edits, or simply never writes a closing message.
+      // The author is then left with a pile of tool-call cards and an empty
+      // reply, with no way to tell whether the work finished. Spend one short,
+      // tool-free call so the turn actually says something.
+      if (
+        !completion.text.trim() &&
+        completion.toolCalls.length > 0 &&
+        !abortController.signal.aborted
+      ) {
+        const recovered = await writeClosingMessage({
+          model,
+          temperature,
+          instructions: systemMessage?.content,
+          messages: aiMessages,
+          completion,
+          maxSteps: opts.maxSteps ?? 10,
+          signal: abortController.signal,
+          onEvent,
+          logger: requestLogger,
+        })
+        if (recovered) return { ...completion, text: recovered }
+      }
+
+      return completion
+    },
+  }
+}
+
+/**
+ * Ask the model to report what it just did, with no tools available.
+ *
+ * Only used to rescue a turn that ended silently after tool calls. Tools are
+ * withheld and the step budget is 1, so this can't apply further edits — it can
+ * only describe the ones already applied. Returns null if it produces nothing,
+ * leaving the caller's empty result untouched.
+ */
+async function writeClosingMessage(args: {
+  model: LanguageModel
+  temperature: number | undefined
+  instructions: string | undefined
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>
+  completion: { toolCalls: Array<{ toolName: string; args: Record<string, unknown> }>; stepCount: number }
+  maxSteps: number
+  signal: AbortSignal
+  onEvent: (event: ChatStreamEvent) => void
+  logger: Logger
+}): Promise<string | null> {
+  const { model, temperature, instructions, messages, completion, maxSteps, signal, onEvent } = args
+
+  const applied = completion.toolCalls
+    .filter(tc => tc.toolName !== 'planEdits')
+    .map(tc => `- ${tc.toolName}(${JSON.stringify(tc.args).slice(0, 300)})`)
+    .join('\n')
+
+  const ranOutOfSteps = completion.stepCount >= maxSteps
+  const closingRequest = ranOutOfSteps
+    ? 'You hit your tool-step limit for this turn. Briefly tell me what you changed and what is still left to do. Do not claim you finished work you did not do.'
+    : 'Briefly tell me what you changed.'
+
+  try {
+    const closer = new ToolLoopAgent({
+      model,
+      instructions: instructions || 'You are a helpful assistant.',
+      tools: {},
+      toolChoice: 'none',
+      stopWhen: stepCountIs(1),
+      temperature,
+    })
+
+    const closing = await closer.stream({
+      messages: [
+        ...messages,
+        { role: 'assistant' as const, content: `I made these changes:\n${applied || '(none)'}` },
+        { role: 'user' as const, content: closingRequest },
+      ],
+      abortSignal: signal,
+    })
+
+    let text = ''
+    for await (const part of closing.fullStream) {
+      const p = part as { type?: string; text?: string }
+      if (p.type === 'text-delta' && p.text) {
+        text += p.text
+        onEvent({ type: 'text', text: p.text })
+      }
+    }
+
+    const trimmed = text.trim()
+    if (!trimmed) return null
+    args.logger.info('Recovered an empty librarian turn with a closing message', {
+      toolCallCount: completion.toolCalls.length,
+      ranOutOfSteps,
+    })
+    return text
+  } catch (err) {
+    // Best-effort: a failed rescue must not fail the turn whose edits landed.
+    args.logger.warn('Could not write a closing message for an empty turn', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
   }
 }

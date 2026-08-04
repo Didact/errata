@@ -30,6 +30,9 @@ function toLocalChatMessage(m: ChatHistory['messages'][number]): ChatMessage {
             })),
           }
         : {}),
+      ...(m.plan?.length ? { plan: m.plan } : {}),
+      ...(m.completedSteps?.length ? { completedSteps: m.completedSteps } : {}),
+      ...(m.incomplete ? { incomplete: true } : {}),
       ...(m.error ? { error: m.error } : {}),
     }
   }

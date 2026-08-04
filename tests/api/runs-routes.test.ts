@@ -7,13 +7,15 @@ import type { StoryMeta } from '@/server/fragments/schema'
 
 // Mock the AI SDK ToolLoopAgent so we control exactly when the stream yields.
 const mockAgentStream = vi.fn()
+const mockAgentCtor = vi.fn()
 
 vi.mock('ai', async () => {
   const actual = await vi.importActual('ai')
   return {
     ...actual,
     ToolLoopAgent: class MockToolLoopAgent {
-      constructor() {
+      constructor(config: unknown) {
+        mockAgentCtor(config)
         return { stream: mockAgentStream } as unknown as MockToolLoopAgent
       }
     },
@@ -88,6 +90,7 @@ describe('run routes', () => {
     app = createApp(dataDir)
     await createStory(dataDir, makeStory())
     mockAgentStream.mockClear()
+    mockAgentCtor.mockClear()
   })
 
   afterEach(async () => {
@@ -389,6 +392,101 @@ describe('run routes', () => {
     ])
 
     gate.resolve()
+  })
+
+  /**
+   * "It returns an empty response, but tool calls have been made."
+   *
+   * The tool loop can end *on* a tool call — the model spends its step budget
+   * applying edits and never writes a closing message. That left the author
+   * with tool-call cards and a blank bubble. The turn now gets one short,
+   * tool-free call so it actually reports what it did.
+   */
+  it('rescues a turn that ends on tool calls with nothing said', async () => {
+    let call = 0
+    mockAgentStream.mockImplementation(() => {
+      call++
+      if (call === 1) {
+        // Burns both steps on edits, no text.
+        return Promise.resolve({
+          fullStream: (async function* () {
+            yield { type: 'tool-call', toolCallId: 't1', toolName: 'updateFragment', input: { id: 'ch-1' } }
+            yield { type: 'tool-result', toolCallId: 't1', toolName: 'updateFragment', output: { ok: true } }
+            yield { type: 'finish-step' }
+            yield { type: 'tool-call', toolCallId: 't2', toolName: 'editProse', input: { id: 'pr-1' } }
+            yield { type: 'tool-result', toolCallId: 't2', toolName: 'editProse', output: { ok: true } }
+            yield { type: 'finish-step' }
+            yield { type: 'finish', finishReason: 'tool-calls' }
+          })(),
+          totalUsage: Promise.resolve(undefined),
+        })
+      }
+      // The closing call.
+      return Promise.resolve({
+        fullStream: (async function* () {
+          yield { type: 'text-delta', text: 'I updated Alice and edited the opening.' }
+          yield { type: 'finish', finishReason: 'stop' }
+        })(),
+        totalUsage: Promise.resolve(undefined),
+      })
+    })
+
+    const { events } = { events: await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Do the thing' })) }
+    await new Promise(r => setTimeout(r, 100))
+
+    // The recovered text reaches the client as normal text events.
+    expect(events.filter(e => e.type === 'text').map(e => e.text).join(''))
+      .toBe('I updated Alice and edited the opening.')
+
+    const history = await getChatHistory(dataDir, STORY_ID)
+    const turn = history.messages[1]
+    expect(turn.content).toBe('I updated Alice and edited the opening.')
+    expect(turn.toolCalls).toHaveLength(2)
+
+    // The closing call must not be able to make further edits.
+    const closerConfig = mockAgentCtor.mock.calls.at(-1)![0] as { tools: object; toolChoice: string }
+    expect(Object.keys(closerConfig.tools)).toHaveLength(0)
+    expect(closerConfig.toolChoice).toBe('none')
+  })
+
+  it('flags a step-exhausted turn as incomplete even without a planEdits call', async () => {
+    mockAgentStream.mockImplementation(() => Promise.resolve({
+      fullStream: (async function* () {
+        for (let i = 0; i < 10; i++) {
+          yield { type: 'tool-call', toolCallId: `t${i}`, toolName: 'updateFragment', input: { id: `ch-${i}` } }
+          yield { type: 'tool-result', toolCallId: `t${i}`, toolName: 'updateFragment', output: { ok: true } }
+          yield { type: 'finish-step' }
+        }
+        yield { type: 'finish', finishReason: 'tool-calls' }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    }))
+
+    await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Do lots' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    // maxSteps defaults to 10 in the test settings, so this turn exhausted it.
+    expect((await getChatHistory(dataDir, STORY_ID)).messages[1].incomplete).toBe(true)
+  })
+
+  it('leaves a turn that already said something alone', async () => {
+    mockAgentStream.mockResolvedValue({
+      fullStream: (async function* () {
+        yield { type: 'tool-call', toolCallId: 't1', toolName: 'updateFragment', input: {} }
+        yield { type: 'tool-result', toolCallId: 't1', toolName: 'updateFragment', output: { ok: true } }
+        yield { type: 'finish-step' }
+        yield { type: 'text-delta', text: 'Done.' }
+        yield { type: 'finish', finishReason: 'stop' }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    })
+
+    await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Go' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    expect((await getChatHistory(dataDir, STORY_ID)).messages[1].content).toBe('Done.')
+    // No rescue call — one agent construction only.
+    expect(mockAgentStream).toHaveBeenCalledTimes(1)
   })
 
   it('404s for an unknown run', async () => {

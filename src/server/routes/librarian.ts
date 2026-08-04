@@ -56,7 +56,10 @@ function deriveChatTurnFields(
   const completedSteps = result.toolCalls
     .filter(tc => tc.toolName !== 'planEdits')
     .map(tc => `${tc.toolName}(${JSON.stringify(tc.args)})`)
-  const incomplete = Boolean(plan?.length) && result.stepCount >= maxSteps
+  // Running out of steps mid-work leaves the request unfinished whether or not
+  // the model declared a plan first — keying this on `plan` alone meant an
+  // exhausted turn with no `planEdits` call was silently recorded as a success.
+  const incomplete = result.stepCount >= maxSteps && result.toolCalls.length > 0
 
   return {
     toolCalls: result.toolCalls,
