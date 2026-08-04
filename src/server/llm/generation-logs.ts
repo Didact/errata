@@ -17,6 +17,8 @@ export interface TokenUsage {
 
 export interface GenerationLog {
   id: string
+  /** The run that produced this generation, for correlating with the run registry. */
+  runId?: string
   createdAt: string
   input: string
   messages: Array<{ role: string; content: string }>

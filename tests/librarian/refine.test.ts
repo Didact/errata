@@ -58,50 +58,35 @@ function makeFragment(overrides: Partial<Fragment>): Fragment {
   }
 }
 
-function createMockStreamResult(text: string) {
-  const eventStream = new ReadableStream<string>({
-    start(controller) {
-      controller.enqueue(JSON.stringify({ type: 'text', text }) + '\n')
-      controller.enqueue(JSON.stringify({ type: 'finish', finishReason: 'stop', stepCount: 1 }) + '\n')
-      controller.close()
-    },
-  })
-
-  const completion = Promise.resolve({
-    text,
-    reasoning: '',
-    toolCalls: [] as Array<{ toolName: string; args: Record<string, unknown>; result: unknown }>,
-    stepCount: 1,
-    finishReason: 'stop',
-  })
-
+/** An AgentStreamResult that pushes `events` and resolves with the given result. */
+function createMockEventStreamResult(
+  events: Array<Record<string, unknown>>,
+  text: string,
+  reasoning = '',
+) {
   return {
-    eventStream,
-    completion,
+    cancel: vi.fn(),
+    run: async (onEvent: (event: Record<string, unknown>) => void) => {
+      for (const event of events) onEvent(event)
+      return {
+        text,
+        reasoning,
+        toolCalls: [] as Array<{ toolName: string; args: Record<string, unknown>; result: unknown }>,
+        stepCount: 1,
+        finishReason: 'stop',
+      }
+    },
   }
 }
 
-function createMockEventStreamResult(events: Array<Record<string, unknown>>, text: string, reasoning = '') {
-  const eventStream = new ReadableStream<string>({
-    start(controller) {
-      for (const event of events) {
-        controller.enqueue(JSON.stringify(event) + '\n')
-      }
-      controller.close()
-    },
-  })
-
-  const completion = Promise.resolve({
+function createMockStreamResult(text: string) {
+  return createMockEventStreamResult(
+    [
+      { type: 'text', text },
+      { type: 'finish', finishReason: 'stop', stepCount: 1 },
+    ],
     text,
-    reasoning,
-    stepCount: 1,
-    finishReason: 'stop',
-  })
-
-  return {
-    eventStream,
-    completion,
-  }
+  )
 }
 
 describe('librarian refine endpoint', () => {

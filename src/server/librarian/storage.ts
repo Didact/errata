@@ -6,6 +6,12 @@ import { getActiveProseIds } from '../fragments/prose-chain'
 import { generateConversationId } from '@/lib/fragment-ids'
 import { writeJsonAtomic } from '../fs-utils'
 import { withKeyLock } from '../async-lock'
+import { getRun } from '../runs'
+
+/** True while a run is still executing, so a persisted `streaming` turn is believable. */
+function isRunLive(runId: string): boolean {
+  return getRun(runId)?.status === 'running'
+}
 
 /** Serializes read-modify-write of a story's analysis index against concurrent saves. */
 function withIndexLock<T>(storyId: string, fn: () => Promise<T>): Promise<T> {
@@ -513,6 +519,14 @@ export interface ChatHistoryToolCall {
   result?: unknown
 }
 
+/**
+ * Lifecycle of an assistant turn. A turn is written as `streaming` *before* the
+ * generation starts and updated in place as it progresses, so the persisted
+ * history always reflects what actually happened — including tool calls that
+ * already mutated fragments — even if the client is long gone.
+ */
+export type ChatTurnStatus = 'streaming' | 'complete' | 'error' | 'cancelled'
+
 export interface ChatHistoryMessage {
   role: 'user' | 'assistant'
   content: string
@@ -521,6 +535,10 @@ export interface ChatHistoryMessage {
   plan?: string[]
   completedSteps?: string[]
   incomplete?: boolean
+  /** The run that produced (or is producing) this assistant turn. */
+  runId?: string
+  status?: ChatTurnStatus
+  error?: string
 }
 
 export interface ChatHistory {
@@ -533,11 +551,27 @@ async function chatHistoryPath(dataDir: string, storyId: string): Promise<string
   return join(dir, 'chat-history.json')
 }
 
-export async function getChatHistory(
+/**
+ * Resolve the on-disk path for either the legacy per-story chat or a named
+ * conversation, so both share one read/append/update implementation.
+ */
+async function historyPathFor(
   dataDir: string,
   storyId: string,
+  conversationId: string | null,
+): Promise<string> {
+  if (!conversationId) return chatHistoryPath(dataDir, storyId)
+  const dir = await librarianDir(dataDir, storyId)
+  return conversationHistoryPath(dir, conversationId)
+}
+
+/** Read the file exactly as stored, with no status reconciliation. */
+async function readHistoryFile(
+  dataDir: string,
+  storyId: string,
+  conversationId: string | null,
 ): Promise<ChatHistory> {
-  const path = await chatHistoryPath(dataDir, storyId)
+  const path = await historyPathFor(dataDir, storyId, conversationId)
   if (!existsSync(path)) {
     return { messages: [], updatedAt: new Date().toISOString() }
   }
@@ -545,20 +579,102 @@ export async function getChatHistory(
   return JSON.parse(raw) as ChatHistory
 }
 
+/**
+ * Report turns whose run no longer exists as interrupted.
+ *
+ * A `streaming` turn is only truthful while its run is alive. If the server
+ * restarted (or the run aged out of the registry) mid-turn, the stored status
+ * would otherwise claim a generation is still in flight forever. Deriving this
+ * on read means no migration and no stale lock file — and the tool calls that
+ * did land are still shown, which is the point.
+ */
+function reconcileHistory(history: ChatHistory, isRunLive: (runId: string) => boolean): ChatHistory {
+  let changed = false
+  const messages = history.messages.map((m) => {
+    if (m.status !== 'streaming') return m
+    if (m.runId && isRunLive(m.runId)) return m
+    changed = true
+    return { ...m, status: 'error' as const, error: m.error ?? 'Generation was interrupted' }
+  })
+  return changed ? { ...history, messages } : history
+}
+
+export async function getChatHistory(
+  dataDir: string,
+  storyId: string,
+): Promise<ChatHistory> {
+  return reconcileHistory(await readHistoryFile(dataDir, storyId, null), isRunLive)
+}
+
 export async function appendChatMessage(
   dataDir: string,
   storyId: string,
   message: ChatHistoryMessage,
 ): Promise<ChatHistory> {
-  return withChatLock(storyId, null, async () => {
+  return appendMessage(dataDir, storyId, null, message)
+}
+
+/**
+ * Patch an assistant turn in place, addressed by its run id.
+ *
+ * Called repeatedly while a run streams (throttled, and on every tool result)
+ * and once more when it settles. Keyed on `runId` rather than "the last
+ * message" so a late write can never clobber a newer turn.
+ */
+export async function updateChatMessageByRunId(
+  dataDir: string,
+  storyId: string,
+  conversationId: string | null,
+  runId: string,
+  patch: Partial<ChatHistoryMessage>,
+): Promise<ChatHistory> {
+  return withChatLock(storyId, conversationId, async () => {
+    const current = await readHistoryFile(dataDir, storyId, conversationId)
+    const idx = current.messages.findIndex(m => m.runId === runId)
+    if (idx === -1) return current
+
+    const messages = [...current.messages]
+    messages[idx] = { ...messages[idx], ...patch }
+    const history: ChatHistory = { messages, updatedAt: new Date().toISOString() }
+
     const dir = await librarianDir(dataDir, storyId)
     await mkdir(dir, { recursive: true })
-    const current = await getChatHistory(dataDir, storyId)
+    await writeJsonAtomic(await historyPathFor(dataDir, storyId, conversationId), history)
+    return history
+  })
+}
+
+/** Shared append used by both the legacy chat and named conversations. */
+async function appendMessage(
+  dataDir: string,
+  storyId: string,
+  conversationId: string | null,
+  message: ChatHistoryMessage,
+): Promise<ChatHistory> {
+  return withChatLock(storyId, conversationId, async () => {
+    const dir = await librarianDir(dataDir, storyId)
+    await mkdir(dir, { recursive: true })
+    const current = await readHistoryFile(dataDir, storyId, conversationId)
     const history: ChatHistory = {
       messages: [...current.messages, message],
       updatedAt: new Date().toISOString(),
     }
-    await writeJsonAtomic(await chatHistoryPath(dataDir, storyId), history)
+    await writeJsonAtomic(await historyPathFor(dataDir, storyId, conversationId), history)
+
+    if (conversationId) {
+      // Index touch (title/updatedAt) — serialized against conversation CRUD via withIndexLock.
+      await withIndexLock(storyId, async () => {
+        const index = await readConversationsIndex(dataDir, storyId)
+        const conv = index.conversations.find(c => c.id === conversationId)
+        if (conv) {
+          conv.updatedAt = history.updatedAt
+          if (conv.title === 'New chat' && message.role === 'user') {
+            conv.title = message.content.slice(0, 60).trim() || 'New chat'
+          }
+          await writeConversationsIndex(dataDir, storyId, index)
+        }
+      })
+    }
     return history
   })
 }
@@ -670,11 +786,7 @@ export async function getConversationHistory(
   storyId: string,
   conversationId: string,
 ): Promise<ChatHistory> {
-  const dir = await librarianDir(dataDir, storyId)
-  const path = conversationHistoryPath(dir, conversationId)
-  if (!existsSync(path)) return { messages: [], updatedAt: new Date().toISOString() }
-  const raw = await readFile(path, 'utf-8')
-  return JSON.parse(raw) as ChatHistory
+  return reconcileHistory(await readHistoryFile(dataDir, storyId, conversationId), isRunLive)
 }
 
 export async function appendConversationMessage(
@@ -683,28 +795,5 @@ export async function appendConversationMessage(
   conversationId: string,
   message: ChatHistoryMessage,
 ): Promise<ChatHistory> {
-  return withChatLock(storyId, conversationId, async () => {
-    const dir = await librarianDir(dataDir, storyId)
-    await mkdir(dir, { recursive: true })
-    const current = await getConversationHistory(dataDir, storyId, conversationId)
-    const history: ChatHistory = {
-      messages: [...current.messages, message],
-      updatedAt: new Date().toISOString(),
-    }
-    await writeJsonAtomic(conversationHistoryPath(dir, conversationId), history)
-
-    // Index touch (title/updatedAt) — serialized against conversation CRUD via withIndexLock.
-    await withIndexLock(storyId, async () => {
-      const index = await readConversationsIndex(dataDir, storyId)
-      const conv = index.conversations.find(c => c.id === conversationId)
-      if (conv) {
-        conv.updatedAt = history.updatedAt
-        if (conv.title === 'New chat' && message.role === 'user') {
-          conv.title = message.content.slice(0, 60).trim() || 'New chat'
-        }
-        await writeConversationsIndex(dataDir, storyId, index)
-      }
-    })
-    return history
-  })
+  return appendMessage(dataDir, storyId, conversationId, message)
 }

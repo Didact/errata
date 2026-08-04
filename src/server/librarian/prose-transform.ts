@@ -59,14 +59,12 @@ export const transformProseSelection = createStreamingRunner<ProseTransformOptio
     contextAfter: opts.contextAfter,
   }),
 
-  afterStream: (result) => {
-    result.completion.then((c) => {
-      transformLogger.info('Prose transform completed', {
-        stepCount: c.stepCount,
-        finishReason: c.finishReason,
-        outputLength: c.text.trim().length,
-        reasoningLength: c.reasoning.trim().length,
-      })
-    }).catch(() => {})
+  afterStream: (c) => {
+    transformLogger.info('Prose transform completed', {
+      stepCount: c.stepCount,
+      finishReason: c.finishReason,
+      outputLength: c.text.trim().length,
+      reasoningLength: c.reasoning.trim().length,
+    })
   },
 })

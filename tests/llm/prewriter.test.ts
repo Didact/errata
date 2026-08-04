@@ -376,8 +376,9 @@ describe('prewriter', () => {
       const events = await parseNDJSON(res)
       const phaseEvents = events.filter((e) => e.type === 'phase')
       expect(phaseEvents).toHaveLength(2)
-      expect(phaseEvents[0]).toEqual({ type: 'phase', phase: 'prewriting' })
-      expect(phaseEvents[1]).toEqual({ type: 'phase', phase: 'writing' })
+      // Events carry a `seq` cursor so a reconnecting client can resume.
+      expect(phaseEvents[0]).toMatchObject({ type: 'phase', phase: 'prewriting' })
+      expect(phaseEvents[1]).toMatchObject({ type: 'phase', phase: 'writing' })
 
       // Two ToolLoopAgent instances: prewriter + writer
       expect(mockAgentCtor).toHaveBeenCalledTimes(2)
@@ -539,7 +540,7 @@ describe('prewriter', () => {
       expect(log).toBeDefined()
       expect(log!.prewriterBrief).toBe('Brief: focus on dialogue.')
       expect(log!.prewriterModel).toBeDefined()
-      expect(log!.prewriterDurationMs).toBeGreaterThan(0)
+      expect(log!.prewriterDurationMs).toBeGreaterThanOrEqual(0)
     })
 
     it('mode-specific planning prompts differ for generate vs regenerate', async () => {

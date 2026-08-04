@@ -7,7 +7,7 @@ import { createFragmentTools } from '../llm/tools'
 import { pluginRegistry } from '../plugins/registry'
 import { collectPluginTools } from '../plugins/tools'
 import { createLogger } from '../logging'
-import { createEventStream } from '../agents/create-event-stream'
+import { consumeAgentStream } from '../agents/create-event-stream'
 import { compileAgentContext } from '../agents/compile-agent-context'
 import { createAgentInstance } from '../agents/agent-instance'
 import { getFragmentsByTag } from '../fragments/associations'
@@ -120,7 +120,9 @@ async function librarianChatInner(
       const agent = createAgentInstance('librarian.optimize-character', { dataDir, storyId })
       try {
         const result = await agent.execute({ fragmentId, instructions })
-        await result.completion
+        // Nested agent: drive it to completion, discarding its events — the
+        // chat turn reports the outcome, not the sub-agent's token stream.
+        await result.run(() => {})
         return { ok: true, fragmentId }
       } catch (err) {
         agent.fail(err)
@@ -211,10 +213,16 @@ async function librarianChatInner(
     })),
   ]
 
-  // Stream with write tools
+  // Prepare the stream. The abort signal is wired to explicit cancel only — a
+  // client disconnecting must never stop a turn that is already applying edits.
+  const abortController = new AbortController()
   const result = await chatAgent.stream({
     messages: aiMessages,
+    abortSignal: abortController.signal,
   })
 
-  return createEventStream(result.fullStream)
+  return {
+    cancel: () => abortController.abort(),
+    run: (onEvent) => consumeAgentStream(result.fullStream, onEvent),
+  }
 }

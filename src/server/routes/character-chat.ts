@@ -6,11 +6,15 @@ import {
   getConversation as getCharacterConversation,
   listConversations as listCharacterConversations,
   deleteConversation as deleteCharacterConversation,
+  appendMessage as appendCharacterMessage,
+  updateMessageByRunId as updateCharacterMessageByRunId,
   generateConversationId,
   type CharacterChatConversation,
 } from '../character-chat/storage'
 import { createLogger } from '../logging'
-import { encodeStream } from './encode-stream'
+import { startRun, findLiveRun } from '../runs'
+import { runStreamResponse, resolveExistingRun } from '../runs/http'
+import { createTurnTracker } from '../runs/turn-tracker'
 
 export function characterChatRoutes(dataDir: string) {
   const logger = createLogger('api:character-chat', { dataDir })
@@ -87,7 +91,7 @@ export function characterChatRoutes(dataDir: string) {
 
     .post('/stories/:storyId/character-chat/conversations/:conversationId/chat', async ({ params, body, set }) => {
       const requestLogger = logger.child({ storyId: params.storyId, extra: { conversationId: params.conversationId } })
-      requestLogger.info('Character chat request', { messageCount: body.messages.length })
+      requestLogger.info('Character chat request')
 
       const story = await getStory(dataDir, params.storyId)
       if (!story) {
@@ -101,68 +105,114 @@ export function characterChatRoutes(dataDir: string) {
         return { error: 'Conversation not found' }
       }
 
-      if (!body.messages.length) {
+      const text = body.message.trim()
+      if (!text) {
         set.status = 422
-        return { error: 'At least one message is required' }
+        return { error: 'message is required' }
       }
 
-      let agent: ReturnType<typeof createAgentInstance> | undefined
-      try {
-        agent = createAgentInstance('character-chat.chat', { dataDir, storyId: params.storyId })
-        const { eventStream, completion } = await agent.execute({
-          characterId: conv.characterId,
-          persona: conv.persona,
-          storyPointFragmentId: conv.storyPointFragmentId,
-          messages: body.messages,
-          maxSteps: story.settings.maxSteps ?? 10,
-        })
+      const existing = resolveExistingRun(params.storyId, params.conversationId, body.clientRequestId)
+      if (existing) return existing
 
-        // Persist conversation after completion (in background)
-        completion.then(async (result) => {
-          requestLogger.info('Character chat completed', {
-            stepCount: result.stepCount,
-            finishReason: result.finishReason,
-            toolCallCount: result.toolCalls.length,
-          })
-          const now = new Date().toISOString()
-          const updatedConv: CharacterChatConversation = {
-            ...conv,
-            messages: [
-              ...body.messages.map((m) => ({
-                role: m.role as 'user' | 'assistant',
-                content: m.content,
-                createdAt: now,
-              })),
-              {
-                role: 'assistant' as const,
+      const live = findLiveRun(params.storyId, 'character-chat', params.conversationId)
+      if (live) {
+        set.status = 409
+        return { error: 'A chat turn is already running', runId: live.id }
+      }
+
+      try {
+        // The client sends only the new message; the server owns the transcript.
+        const afterUser = await appendCharacterMessage(dataDir, params.storyId, params.conversationId, {
+          role: 'user',
+          content: text,
+          createdAt: new Date().toISOString(),
+        })
+        const agentMessages = (afterUser ?? conv).messages.map(m => ({ role: m.role, content: m.content }))
+
+        const run = await startRun({
+          dataDir,
+          storyId: params.storyId,
+          kind: 'character-chat',
+          scopeId: params.conversationId,
+          ...(body.clientRequestId ? { clientRequestId: body.clientRequestId } : {}),
+          body: async ({ runId, emit, signal }) => {
+            await appendCharacterMessage(dataDir, params.storyId, params.conversationId, {
+              role: 'assistant',
+              content: '',
+              createdAt: new Date().toISOString(),
+              runId,
+              status: 'streaming',
+            })
+
+            const tracker = createTurnTracker({
+              write: (snap) => updateCharacterMessageByRunId(
+                dataDir, params.storyId, params.conversationId, runId,
+                {
+                  content: snap.content,
+                  ...(snap.reasoning ? { reasoning: snap.reasoning } : {}),
+                },
+              ),
+            })
+
+            const agent = createAgentInstance('character-chat.chat', { dataDir, storyId: params.storyId })
+            let streamResult
+            try {
+              streamResult = await agent.execute({
+                characterId: conv.characterId,
+                persona: conv.persona,
+                storyPointFragmentId: conv.storyPointFragmentId,
+                messages: agentMessages,
+                maxSteps: story.settings.maxSteps ?? 10,
+              })
+            } catch (err) {
+              agent.fail(err)
+              throw err
+            }
+
+            signal.addEventListener('abort', () => streamResult.cancel(), { once: true })
+
+            try {
+              const result = await streamResult.run((event) => {
+                emit(event)
+                tracker.onEvent(event)
+              })
+
+              await tracker.flush()
+              await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
                 content: result.text,
                 ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-                createdAt: now,
-              },
-            ],
-            updatedAt: now,
-          }
-          await saveCharacterConversation(dataDir, params.storyId, updatedConv)
-        }).catch((err) => {
-          requestLogger.error('Character chat completion error', { error: err instanceof Error ? err.message : String(err) })
+                status: 'complete',
+              })
+
+              requestLogger.info('Character chat completed', {
+                runId,
+                stepCount: result.stepCount,
+                finishReason: result.finishReason,
+                toolCallCount: result.toolCalls.length,
+              })
+            } catch (err) {
+              // Keep whatever streamed through rather than dropping the turn.
+              await tracker.flush()
+              await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
+                status: signal.aborted ? 'cancelled' : 'error',
+                ...(signal.aborted ? {} : { error: err instanceof Error ? err.message : String(err) }),
+              })
+              throw err
+            }
+          },
         })
 
-        return new Response(encodeStream(eventStream), {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        })
+        return runStreamResponse(run)
       } catch (err) {
-        agent?.fail(err)
-        requestLogger.error('Character chat failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Character chat failed to start', { error: err instanceof Error ? err.message : String(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }
     }, {
-      detail: { summary: 'Send a message (streaming NDJSON)' },
+      detail: { summary: 'Send a message (starts a run; streaming NDJSON)' },
       body: t.Object({
-        messages: t.Array(t.Object({
-          role: t.Union([t.Literal('user'), t.Literal('assistant')]),
-          content: t.String(),
-        })),
+        message: t.String({ minLength: 1 }),
+        clientRequestId: t.Optional(t.String()),
       }),
     })
 }
