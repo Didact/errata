@@ -17,6 +17,7 @@ Join the community on Discord: https://discord.gg/ywVFKvdH49
 - **Block-based context** — visual editor for reordering, overriding, and extending LLM prompt structure, including JavaScript-powered script blocks with live preview
 - **Agent context panel** — per-agent block editor for customizing any agent's prompt, disabling tools, and setting model overrides
 - **Librarian memory tools** — rolling continuity, hierarchical summaries, contradiction tracking, and summary compaction controls
+- **Server-authoritative generations** — every LLM run lives on the server, not in the browser tab. Close the tab, background it on a phone, or lose signal: the generation keeps going and the client reattaches from where it left off, so nothing is truncated, lost, or applied twice
 - **Universal import/export** — drag-and-drop JSON, bundle ZIPs, and SillyTavern/Tavern cards (PNG/JSON with lorebook support)
 - **Story cover images** — cover art with gallery grid layout on the story list
 - **Plugin system** — bundled + external runtime plugins with iframe UI panels
@@ -141,6 +142,7 @@ Plugins can register fragment types, LLM tools, API routes, and pipeline hooks. 
 ## Documentation
 
 - [Architecture & data model](PLAN.md)
+- [Streaming runs](docs/streaming-runs.md)
 - [Generation pipeline](docs/generation-pipeline.md)
 - [Context block system](docs/context-blocks.md)
 - [Instruction registry](docs/instruction-registry.md)

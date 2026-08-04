@@ -675,7 +675,7 @@ The **Agent Configure** panel is accessible from the sidebar under **Management 
 | `src/server/agents/agent-block-storage.ts` | Per-agent block config storage |
 | `src/server/agents/compile-agent-context.ts` | `compileAgentContext()` — assembles messages from blocks |
 | `src/server/agents/create-agent.ts` | `createToolAgent()` — shared `ToolLoopAgent` wrapper |
-| `src/server/agents/create-event-stream.ts` | `createEventStream()` — shared NDJSON stream builder |
+| `src/server/agents/create-event-stream.ts` | `consumeAgentStream()` — drives an agent stream, pushing normalized events |
 | `src/server/agents/stream-types.ts` | `AgentStreamEvent`, `AgentStreamResult`, `ChatResult` types |
 | `src/server/librarian/blocks.ts` | Block definitions for all librarian agents |
 | `src/server/character-chat/blocks.ts` | Block definitions for character chat |
