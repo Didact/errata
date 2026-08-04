@@ -135,12 +135,16 @@ async function startLibrarianChatRun(args: {
 
         // Settle history before the run is marked finished, so a client that
         // sees `run-end` and refetches always reads the final turn.
+        //
+        // An aborted provider stream often ends gracefully rather than
+        // throwing, so completing normally is not proof the turn finished —
+        // the signal is what says whether the author stopped it.
         await tracker.flush()
         await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
           content: result.text,
           ...(result.reasoning ? { reasoning: result.reasoning } : {}),
           ...deriveChatTurnFields(result, maxSteps),
-          status: 'complete',
+          status: signal.aborted ? 'cancelled' : 'complete',
         })
 
         logger.info('Librarian chat completed', {

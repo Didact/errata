@@ -177,11 +177,14 @@ export function characterChatRoutes(dataDir: string) {
                 tracker.onEvent(event)
               })
 
+              // An aborted provider stream often ends gracefully rather than
+              // throwing, so the signal — not the absence of an error — is what
+              // says whether the author stopped this turn.
               await tracker.flush()
               await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
                 content: result.text,
                 ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-                status: 'complete',
+                status: signal.aborted ? 'cancelled' : 'complete',
               })
 
               requestLogger.info('Character chat completed', {

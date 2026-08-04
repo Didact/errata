@@ -318,6 +318,44 @@ describe('run routes', () => {
     expect(history.messages[1]).toMatchObject({ role: 'assistant', status: 'cancelled' })
   })
 
+  /**
+   * A real provider usually ends the stream *gracefully* when the abort signal
+   * fires rather than throwing, so "the run body returned without error" is not
+   * proof the turn finished. Only the signal says whether the author stopped it.
+   */
+  it('records a cancelled turn as cancelled even when the provider ends gracefully', async () => {
+    const gate = deferred()
+    mockAgentStream.mockImplementation(({ abortSignal }: { abortSignal?: AbortSignal }) => Promise.resolve({
+      fullStream: (async function* () {
+        yield { type: 'text-delta', text: 'Partial' }
+        await gate.promise
+        // Graceful stop: just stop yielding, no throw.
+        if (abortSignal?.aborted) return
+        yield { type: 'text-delta', text: ' and the rest' }
+        yield { type: 'finish', finishReason: 'stop' }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    }))
+
+    const res = await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Go' })
+    const runId = res.headers.get('x-run-id')!
+    await new Promise(r => setTimeout(r, 20))
+
+    await post(`/stories/${STORY_ID}/runs/${runId}/cancel`, {})
+    gate.resolve()
+
+    const events = await readEvents(res)
+    expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'cancelled' })
+
+    await new Promise(r => setTimeout(r, 100))
+    const history = await getChatHistory(dataDir, STORY_ID)
+    expect(history.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'Partial',
+      status: 'cancelled',
+    })
+  })
+
   it('reports a turn orphaned by a restart as interrupted rather than still streaming', async () => {
     const gate = deferred()
     mockAgentStream.mockResolvedValue({

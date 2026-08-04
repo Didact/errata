@@ -49,7 +49,9 @@ export async function fetchStream(
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error ?? `API error: ${res.status}`)
+    // ApiError, not Error: callers branch on `status` (a 404 means the run aged
+    // out and retrying is pointless, whereas a network blip is worth a retry).
+    throw new ApiError(err.error ?? `API error: ${res.status}`, res.status, err)
   }
   if (!res.body) {
     throw new Error('No response body')
@@ -75,7 +77,9 @@ export async function fetchGetEventStream(path: string): Promise<ReadableStream<
   const res = await fetch(`${API_BASE}${path}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error ?? `API error: ${res.status}`)
+    // ApiError, not Error: callers branch on `status` (a 404 means the run aged
+    // out and retrying is pointless, whereas a network blip is worth a retry).
+    throw new ApiError(err.error ?? `API error: ${res.status}`, res.status, err)
   }
   if (!res.body) {
     throw new Error('No response body')
@@ -136,7 +140,9 @@ export async function fetchEventStream(
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error ?? `API error: ${res.status}`)
+    // ApiError, not Error: callers branch on `status` (a 404 means the run aged
+    // out and retrying is pointless, whereas a network blip is worth a retry).
+    throw new ApiError(err.error ?? `API error: ${res.status}`, res.status, err)
   }
   if (!res.body) {
     throw new Error('No response body')
