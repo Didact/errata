@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { consumeRun } from '@/lib/api/runs'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { X, Bot, Plus } from 'lucide-react'
@@ -41,7 +42,8 @@ function useGenerate(storyId: string) {
   const [text, setText] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const readerRef = useRef<ReadableStreamDefaultReader<import('@/lib/api/types').ChatEvent> | null>(null)
+  /** Run currently generating, so Stop can cancel it server-side. */
+  const runIdRef = useRef<string | null>(null)
 
   const generate = useCallback(async (input: string) => {
     setIsStreaming(true)
@@ -50,33 +52,31 @@ function useGenerate(storyId: string) {
 
     try {
       const stream = await api.generation.stream(storyId, input)
-      const reader = stream.getReader()
-      readerRef.current = reader
       let accumulated = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
+      const result = await consumeRun(storyId, stream, (event) => {
+        if (event.type === 'text') {
+          accumulated += event.text
           setText(accumulated)
         }
+      })
+      runIdRef.current = result.runId
+      if (result.status === 'error') {
+        setError(result.error ?? 'Generation failed')
       }
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        setError(err instanceof Error ? err.message : 'Generation failed')
-      }
+      setError(err instanceof Error ? err.message : 'Generation failed')
     } finally {
-      readerRef.current = null
       setIsStreaming(false)
     }
   }, [storyId])
 
+  // Stopping cancels the run server-side; dropping the local reader would only
+  // hide a generation that keeps going.
   const stop = useCallback(() => {
-    readerRef.current?.cancel()
-    readerRef.current = null
+    const runId = runIdRef.current
+    if (runId) void api.runs.cancel(storyId, runId).catch(() => {})
     setIsStreaming(false)
-  }, [])
+  }, [storyId])
 
   const clear = useCallback(() => {
     setText('')

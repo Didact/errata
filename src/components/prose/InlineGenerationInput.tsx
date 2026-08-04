@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { useRunStream } from '@/hooks/use-run-stream'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { PenLine, ArrowRight, Pause, Compass, RefreshCw, Loader2, PenSquare, Type } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { SuggestionDirection, ClarifyQuestion, Clarification } from '@/lib/api/types'
+import type { ChatEvent, RunStatus, SuggestionDirection, ClarifyQuestion, Clarification } from '@/lib/api/types'
 import { QuestionCard } from '@/components/generation/QuestionCard'
 
 // A round high enough that the server withholds the ask tool and must write —
@@ -54,9 +55,15 @@ export function InlineGenerationInput({
   const [pendingQuestions, setPendingQuestions] = useState<ClarifyQuestion[] | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const composeTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
   // In-flight generation context, preserved across the clarify round trip.
   const genCtxRef = useRef<{ input: string; clarifications: Clarification[]; round: number }>({ input: '', clarifications: [], round: 0 })
+  // Streaming scratch state. Refs rather than state so the event handler stays
+  // stable across renders and a token doesn't cost a re-render.
+  const accumulatedTextRef = useRef('')
+  const accumulatedReasoningRef = useRef('')
+  const thoughtStepsRef = useRef<ThoughtStep[]>([])
+  const askedQuestionsRef = useRef<ClarifyQuestion[] | null>(null)
+  const rafScheduledRef = useRef(false)
 
   // Mode state with localStorage persistence
   const [mode, setMode] = useState<InputMode>(() => {
@@ -169,6 +176,119 @@ export function InlineGenerationInput({
 
   const prewriterDirectionsRef = useRef<SuggestionDirection[] | null>(null)
 
+  const handleEvent = useCallback((event: ChatEvent) => {
+    const thoughtSteps = thoughtStepsRef.current
+
+    if (event.type === 'run-start') {
+      accumulatedTextRef.current = ''
+      accumulatedReasoningRef.current = ''
+      thoughtStepsRef.current = []
+      askedQuestionsRef.current = null
+      prewriterDirectionsRef.current = null
+      return
+    }
+    if (event.type === 'run-end') return
+
+    let thoughtsDirty = false
+
+    if (event.type === 'text') {
+      accumulatedTextRef.current += event.text
+    } else if (event.type === 'reasoning') {
+      accumulatedReasoningRef.current += event.text
+      const last = thoughtSteps[thoughtSteps.length - 1]
+      if (last && last.type === 'reasoning') {
+        last.text = accumulatedReasoningRef.current
+      } else {
+        thoughtSteps.push({ type: 'reasoning', text: accumulatedReasoningRef.current })
+      }
+      thoughtsDirty = true
+    } else if (event.type === 'tool-call') {
+      accumulatedReasoningRef.current = ''
+      thoughtSteps.push({ type: 'tool-call', id: event.id, toolName: event.toolName, args: event.args })
+      thoughtsDirty = true
+    } else if (event.type === 'tool-result') {
+      thoughtSteps.push({ type: 'tool-result', id: event.id, toolName: event.toolName, result: event.result })
+      thoughtsDirty = true
+    } else if (event.type === 'prewriter-text') {
+      const last = thoughtSteps[thoughtSteps.length - 1]
+      if (last && last.type === 'prewriter-text') {
+        last.text += event.text
+      } else {
+        accumulatedReasoningRef.current = ''
+        thoughtSteps.push({ type: 'prewriter-text', text: event.text })
+      }
+      thoughtsDirty = true
+    } else if (event.type === 'prewriter-reset') {
+      // Prewriter re-wrote the brief in a new step — clear the live block so
+      // it refills with the final version instead of showing it twice.
+      const last = thoughtSteps[thoughtSteps.length - 1]
+      if (last && last.type === 'prewriter-text') {
+        last.text = ''
+      }
+      thoughtsDirty = true
+    } else if (event.type === 'prewriter-directions') {
+      prewriterDirectionsRef.current = event.directions
+    } else if (event.type === 'clarify-questions') {
+      askedQuestionsRef.current = event.questions
+    } else if (event.type === 'phase') {
+      accumulatedReasoningRef.current = ''
+      thoughtSteps.push({ type: 'phase', phase: event.phase })
+      thoughtsDirty = true
+    } else if (event.type === 'error') {
+      setError(event.error)
+      return
+    }
+
+    if (!rafScheduledRef.current) {
+      rafScheduledRef.current = true
+      const textSnapshot = accumulatedTextRef.current
+      const stepsSnapshot = thoughtsDirty ? [...thoughtSteps] : null
+      requestAnimationFrame(() => {
+        onGenerationStream(textSnapshot)
+        if (stepsSnapshot) onGenerationThoughts?.(stepsSnapshot)
+        rafScheduledRef.current = false
+      })
+    }
+  }, [onGenerationStream, onGenerationThoughts])
+
+  const handleSettled = useCallback(async (status: RunStatus) => {
+    // Final flush
+    onGenerationStream(accumulatedTextRef.current)
+    if (thoughtStepsRef.current.length > 0) onGenerationThoughts?.([...thoughtStepsRef.current])
+
+    if (status === 'error') {
+      onGenerationError()
+      return
+    }
+
+    // The prewriter asked clarifying questions instead of writing — surface
+    // them and wait for answers (no prose was produced this round).
+    if (askedQuestionsRef.current) {
+      setPendingQuestions(askedQuestionsRef.current)
+      onGenerationComplete()
+      return
+    }
+
+    await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
+    await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
+
+    if (prewriterDirectionsRef.current?.length) {
+      setManualSuggestions(prewriterDirectionsRef.current)
+    }
+
+    // A cancelled run still saved whatever prose it produced, so treat it as a
+    // completion rather than an error.
+    setInput('')
+    onGenerationComplete()
+  }, [onGenerationStream, onGenerationThoughts, onGenerationComplete, onGenerationError, queryClient, storyId])
+
+  const run = useRunStream({
+    storyId,
+    kind: 'generation',
+    onEvent: handleEvent,
+    onSettled: handleSettled,
+  })
+
   const handleGenerateWithInput = useCallback(async (generationInput: string, clarifications: Clarification[] = [], round = 0) => {
     if (!generationInput.trim() || isGenerating) return
 
@@ -178,118 +298,18 @@ export function InlineGenerationInput({
     prewriterDirectionsRef.current = null
     genCtxRef.current = { input: generationInput, clarifications, round }
 
-    const ac = new AbortController()
-    abortRef.current = ac
-    let askedQuestions: ClarifyQuestion[] | null = null
-
     try {
-      const opts = clarifications.length || round > 0 ? { clarifications, clarifyRound: round } : undefined
-      const stream = await api.generation.generateAndSave(storyId, generationInput, ac.signal, opts)
-
-      const reader = stream.getReader()
-      let accumulatedText = ''
-      let accumulatedReasoning = ''
-      const thoughtSteps: ThoughtStep[] = []
-      let thoughtsDirty = false
-      let rafScheduled = false
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        if (value.type === 'text') {
-          accumulatedText += value.text
-        } else if (value.type === 'reasoning') {
-          accumulatedReasoning += value.text
-          const last = thoughtSteps[thoughtSteps.length - 1]
-          if (last && last.type === 'reasoning') {
-            last.text = accumulatedReasoning
-          } else {
-            thoughtSteps.push({ type: 'reasoning', text: accumulatedReasoning })
-          }
-          thoughtsDirty = true
-        } else if (value.type === 'tool-call') {
-          accumulatedReasoning = ''
-          thoughtSteps.push({ type: 'tool-call', id: value.id, toolName: value.toolName, args: value.args })
-          thoughtsDirty = true
-        } else if (value.type === 'tool-result') {
-          thoughtSteps.push({ type: 'tool-result', id: value.id, toolName: value.toolName, result: value.result })
-          thoughtsDirty = true
-        } else if (value.type === 'prewriter-text') {
-          const last = thoughtSteps[thoughtSteps.length - 1]
-          if (last && last.type === 'prewriter-text') {
-            last.text += value.text
-          } else {
-            accumulatedReasoning = ''
-            thoughtSteps.push({ type: 'prewriter-text', text: value.text })
-          }
-          thoughtsDirty = true
-        } else if (value.type === 'prewriter-reset') {
-          // Prewriter re-wrote the brief in a new step — clear the live block so
-          // it refills with the final version instead of showing it twice.
-          const last = thoughtSteps[thoughtSteps.length - 1]
-          if (last && last.type === 'prewriter-text') {
-            last.text = ''
-          }
-          thoughtsDirty = true
-        } else if (value.type === 'prewriter-directions') {
-          prewriterDirectionsRef.current = value.directions
-        } else if (value.type === 'clarify-questions') {
-          askedQuestions = value.questions
-        } else if (value.type === 'phase') {
-          accumulatedReasoning = ''
-          thoughtSteps.push({ type: 'phase', phase: value.phase })
-          thoughtsDirty = true
-        }
-
-        if (!rafScheduled) {
-          rafScheduled = true
-          const textSnapshot = accumulatedText
-          const stepsSnapshot = thoughtsDirty ? [...thoughtSteps] : null
-          thoughtsDirty = false
-          requestAnimationFrame(() => {
-            onGenerationStream(textSnapshot)
-            if (stepsSnapshot) onGenerationThoughts?.(stepsSnapshot)
-            rafScheduled = false
-          })
-        }
-      }
-
-      // Final flush
-      onGenerationStream(accumulatedText)
-      if (thoughtSteps.length > 0) onGenerationThoughts?.([...thoughtSteps])
-
-      // The prewriter asked clarifying questions instead of writing — surface
-      // them and wait for answers (no prose was produced this round).
-      if (askedQuestions) {
-        setPendingQuestions(askedQuestions)
-        onGenerationComplete()
-        return
-      }
-
-      await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
-      await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
-
-      if (prewriterDirectionsRef.current?.length) {
-        setManualSuggestions(prewriterDirectionsRef.current)
-      }
-
-      setInput('')
-      onGenerationComplete()
+      await run.start((clientRequestId) => api.generation.generateAndSave(
+        storyId,
+        generationInput,
+        undefined,
+        { clarifications, clarifyRound: round, clientRequestId },
+      ))
     } catch (err) {
-      // User-initiated abort — not an error
-      if (ac.signal.aborted) {
-        await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
-        await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
-        onGenerationComplete()
-      } else {
-        setError(err instanceof Error ? err.message : 'Generation failed')
-        onGenerationError()
-      }
-    } finally {
-      abortRef.current = null
+      setError(err instanceof Error ? err.message : 'Generation failed')
+      onGenerationError()
     }
-  }, [storyId, isGenerating, onGenerationStart, onGenerationStream, onGenerationThoughts, onGenerationComplete, onGenerationError, queryClient])
+  }, [storyId, isGenerating, onGenerationStart, onGenerationError, run])
 
   const handleGenerate = () => {
     handleGenerateWithInput(input)
@@ -307,8 +327,10 @@ export function InlineGenerationInput({
     handleGenerateWithInput(gi, clarifications, FORCE_PROCEED_ROUND)
   }, [handleGenerateWithInput])
 
+  // Stopping is a server-side cancel: the generation outlives this request, so
+  // aborting a local fetch would only hide it, not end it.
   const handleStop = () => {
-    abortRef.current?.abort()
+    void run.cancel()
   }
 
   const handleCompose = async () => {

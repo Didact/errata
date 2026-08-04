@@ -1,4 +1,4 @@
-import type { ChatEvent } from './types'
+import type { SequencedChatEvent } from './types'
 
 const API_BASE = '/api'
 
@@ -71,7 +71,7 @@ export async function fetchStream(
 /**
  * Fetches an NDJSON event stream via GET and returns a ReadableStream of parsed ChatEvent objects.
  */
-export async function fetchGetEventStream(path: string): Promise<ReadableStream<ChatEvent>> {
+export async function fetchGetEventStream(path: string): Promise<ReadableStream<SequencedChatEvent>> {
   const res = await fetch(`${API_BASE}${path}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }))
@@ -84,7 +84,7 @@ export async function fetchGetEventStream(path: string): Promise<ReadableStream<
   const decoder = new TextDecoder()
   let buffer = ''
 
-  return new ReadableStream<ChatEvent>({
+  return new ReadableStream<SequencedChatEvent>({
     async pull(controller) {
       while (true) {
         const newlineIdx = buffer.indexOf('\n')
@@ -93,7 +93,7 @@ export async function fetchGetEventStream(path: string): Promise<ReadableStream<
           buffer = buffer.slice(newlineIdx + 1)
           if (line) {
             try {
-              controller.enqueue(JSON.parse(line) as ChatEvent)
+              controller.enqueue(JSON.parse(line) as SequencedChatEvent)
             } catch {
               // Skip malformed lines
             }
@@ -106,7 +106,7 @@ export async function fetchGetEventStream(path: string): Promise<ReadableStream<
           const remaining = buffer.trim()
           if (remaining) {
             try {
-              controller.enqueue(JSON.parse(remaining) as ChatEvent)
+              controller.enqueue(JSON.parse(remaining) as SequencedChatEvent)
             } catch {
               // Skip malformed
             }
@@ -127,7 +127,7 @@ export async function fetchEventStream(
   path: string,
   body: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<ReadableStream<ChatEvent>> {
+): Promise<ReadableStream<SequencedChatEvent>> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -145,7 +145,7 @@ export async function fetchEventStream(
   const decoder = new TextDecoder()
   let buffer = ''
 
-  return new ReadableStream<ChatEvent>({
+  return new ReadableStream<SequencedChatEvent>({
     async pull(controller) {
       while (true) {
         // Try to extract a complete line from the buffer
@@ -155,7 +155,7 @@ export async function fetchEventStream(
           buffer = buffer.slice(newlineIdx + 1)
           if (line) {
             try {
-              controller.enqueue(JSON.parse(line) as ChatEvent)
+              controller.enqueue(JSON.parse(line) as SequencedChatEvent)
             } catch {
               // Skip malformed lines
             }
@@ -170,7 +170,7 @@ export async function fetchEventStream(
           const remaining = buffer.trim()
           if (remaining) {
             try {
-              controller.enqueue(JSON.parse(remaining) as ChatEvent)
+              controller.enqueue(JSON.parse(remaining) as SequencedChatEvent)
             } catch {
               // Skip malformed
             }

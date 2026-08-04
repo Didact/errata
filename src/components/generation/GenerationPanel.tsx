@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { useRunStream } from '@/hooks/use-run-stream'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { StreamMarkdown } from '@/components/ui/stream-markdown'
@@ -14,7 +15,7 @@ import {
 import { DebugPanel } from './DebugPanel'
 import { QuestionCard } from './QuestionCard'
 import { Send, Eye, Square, Bug, ArrowLeft } from 'lucide-react'
-import type { ClarifyQuestion, Clarification } from '@/lib/api/types'
+import type { ChatEvent, ClarifyQuestion, Clarification } from '@/lib/api/types'
 
 interface GenerationPanelProps {
   storyId: string
@@ -29,12 +30,14 @@ export function GenerationPanel({ storyId, onBack }: GenerationPanelProps) {
   const queryClient = useQueryClient()
   const [input, setInput] = useState('')
   const [streamedText, setStreamedText] = useState('')
-  const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showDebug, setShowDebug] = useState(false)
   const [pendingQuestions, setPendingQuestions] = useState<ClarifyQuestion[] | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
+  // Streaming scratch state, kept out of React so a token doesn't cost a render.
+  const accumulatedRef = useRef('')
+  const askedRef = useRef<ClarifyQuestion[] | null>(null)
+  const rafScheduledRef = useRef(false)
   // In-flight generation context, preserved across the clarify round trip.
   const genCtxRef = useRef<{ input: string; saveResult: boolean; clarifications: Clarification[]; round: number }>({
     input: '',
@@ -42,6 +45,57 @@ export function GenerationPanel({ storyId, onBack }: GenerationPanelProps) {
     clarifications: [],
     round: 0,
   })
+
+  const handleEvent = useCallback((event: ChatEvent) => {
+    if (event.type === 'run-start') {
+      accumulatedRef.current = ''
+      askedRef.current = null
+      return
+    }
+    if (event.type === 'text') {
+      accumulatedRef.current += event.text
+    } else if (event.type === 'clarify-questions') {
+      askedRef.current = event.questions
+    } else if (event.type === 'error') {
+      setError(event.error)
+      return
+    } else {
+      return
+    }
+
+    if (!rafScheduledRef.current && accumulatedRef.current) {
+      rafScheduledRef.current = true
+      const snapshot = accumulatedRef.current
+      requestAnimationFrame(() => {
+        setStreamedText(snapshot)
+        if (outputRef.current) {
+          outputRef.current.scrollTop = outputRef.current.scrollHeight
+        }
+        rafScheduledRef.current = false
+      })
+    }
+  }, [])
+
+  const handleSettled = useCallback(async () => {
+    if (askedRef.current) {
+      setPendingQuestions(askedRef.current)
+      return // wait for the author's answers before finalizing
+    }
+    setStreamedText(accumulatedRef.current)
+    if (genCtxRef.current.saveResult) {
+      await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
+      await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
+      setInput('')
+    }
+  }, [queryClient, storyId])
+
+  const run = useRunStream({
+    storyId,
+    kind: 'generation',
+    onEvent: handleEvent,
+    onSettled: handleSettled,
+  })
+  const isGenerating = run.isStreaming
 
   const runGeneration = useCallback(async (
     genInput: string,
@@ -51,72 +105,26 @@ export function GenerationPanel({ storyId, onBack }: GenerationPanelProps) {
   ) => {
     if (!genInput.trim()) return
 
-    setIsGenerating(true)
     setError(null)
     setPendingQuestions(null)
     if (round === 0) setStreamedText('')
+    accumulatedRef.current = ''
+    askedRef.current = null
     // Preserve the prompt that started this round so answering/skipping reruns
     // against it, even if the author edits the textarea while questions show.
     genCtxRef.current = { input: genInput, saveResult, clarifications, round }
 
-    const ac = new AbortController()
-    abortRef.current = ac
-
-    let asked: ClarifyQuestion[] | null = null
     try {
-      const opts = clarifications.length || round > 0
-        ? { clarifications, clarifyRound: round }
-        : undefined
-      const stream = saveResult
-        ? await api.generation.generateAndSave(storyId, genInput, ac.signal, opts)
-        : await api.generation.stream(storyId, genInput, ac.signal, opts)
-
-      const reader = stream.getReader()
-      let accumulated = ''
-      let rafScheduled = false
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
-        } else if (value.type === 'clarify-questions') {
-          asked = value.questions
-        }
-
-        if (!rafScheduled && accumulated) {
-          rafScheduled = true
-          const snapshot = accumulated
-          requestAnimationFrame(() => {
-            setStreamedText(snapshot)
-            if (outputRef.current) {
-              outputRef.current.scrollTop = outputRef.current.scrollHeight
-            }
-            rafScheduled = false
-          })
-        }
-      }
-
-      if (asked) {
-        setPendingQuestions(asked)
-        return // wait for the author's answers before finalizing
-      }
-
-      setStreamedText(accumulated)
-      if (saveResult) {
-        await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
-        await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
-        setInput('')
-      }
+      await run.start((clientRequestId) => {
+        const opts = { clarifications, clarifyRound: round, clientRequestId }
+        return saveResult
+          ? api.generation.generateAndSave(storyId, genInput, undefined, opts)
+          : api.generation.stream(storyId, genInput, undefined, opts)
+      })
     } catch (err) {
-      if ((err as Error)?.name !== 'AbortError') {
-        setError(err instanceof Error ? err.message : 'Generation failed')
-      }
-    } finally {
-      setIsGenerating(false)
-      abortRef.current = null
+      setError(err instanceof Error ? err.message : 'Generation failed')
     }
-  }, [storyId, queryClient])
+  }, [storyId, run])
 
   const handleGenerate = useCallback((saveResult: boolean) => {
     if (isGenerating) return
@@ -133,14 +141,12 @@ export function GenerationPanel({ storyId, onBack }: GenerationPanelProps) {
     runGeneration(gi, saveResult, clarifications, FORCE_PROCEED_ROUND)
   }, [runGeneration])
 
+  // Stopping is now a server-side cancel, not a local fetch abort: the
+  // generation lives on the server, so only the server can end it.
   const handleStop = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort()
-      abortRef.current = null
-    }
-    setIsGenerating(false)
+    void run.cancel()
     setPendingQuestions(null)
-  }, [])
+  }, [run])
 
   return (
     <Panel data-component-id="generation-panel-root">

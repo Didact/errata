@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ChatEvent, type Fragment } from '@/lib/api'
+import { useRunStream } from '@/hooks/use-run-stream'
 import type { PersonaMode, CharacterChatConversationSummary } from '@/lib/api/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -34,12 +35,16 @@ export function CharacterChatView({ storyId, initialCharacterId, onClose }: Char
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showConversations, setShowConversations] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  /** The assistant turn currently streaming, kept outside React state. */
+  const liveRef = useRef<AssistantMessage | null>(null)
+  /** Mirrors `conversationId` for callbacks that must not re-bind mid-run. */
+  const conversationIdRef = useRef<string | null>(null)
+  useEffect(() => { conversationIdRef.current = conversationId }, [conversationId])
 
   // Data queries
   const { data: allFragments } = useQuery({
@@ -147,6 +152,93 @@ export function CharacterChatView({ storyId, initialCharacterId, onClose }: Char
     }
   }, [storyId])
 
+  /** Fold a live run event into the assistant turn being built. */
+  const handleEvent = useCallback((event: ChatEvent) => {
+    if (event.type === 'run-start') {
+      liveRef.current = { role: 'assistant', content: '' }
+      setMessages(prev => prev[prev.length - 1]?.role === 'assistant'
+        ? prev
+        : [...prev, { role: 'assistant', content: '' }])
+      return
+    }
+    if (event.type === 'run-end') return
+
+    const current = liveRef.current ?? { role: 'assistant' as const, content: '' }
+    let next: AssistantMessage = current
+    switch (event.type) {
+      case 'text':
+        next = { ...current, content: current.content + event.text }
+        break
+      case 'reasoning':
+        next = { ...current, reasoning: (current.reasoning ?? '') + event.text }
+        break
+      case 'tool-call':
+        next = {
+          ...current,
+          toolCalls: [...(current.toolCalls ?? []), { id: event.id, toolName: event.toolName, args: event.args ?? {} }],
+        }
+        break
+      case 'tool-result':
+        next = {
+          ...current,
+          toolCalls: (current.toolCalls ?? []).map(tc => tc.id === event.id ? { ...tc, result: event.result } : tc),
+        }
+        break
+      case 'tool-error':
+        next = {
+          ...current,
+          toolCalls: (current.toolCalls ?? []).map(tc => tc.id === event.id ? { ...tc, error: event.error } : tc),
+        }
+        break
+      case 'error':
+        next = { ...current, error: event.error }
+        break
+      default:
+        return
+    }
+
+    liveRef.current = next
+    setMessages(prev => {
+      const copy = [...prev]
+      if (copy[copy.length - 1]?.role === 'assistant') copy[copy.length - 1] = next
+      else copy.push(next)
+      return copy
+    })
+  }, [])
+
+  const handleSettled = useCallback(async (_status: string, message?: string) => {
+    liveRef.current = null
+    if (message) setError(message)
+    // The server owns the transcript — reload it rather than trusting what we
+    // happened to receive.
+    const convId = conversationIdRef.current
+    if (convId) {
+      try {
+        const conv = await api.characterChat.getConversation(storyId, convId)
+        setMessages(conv.messages.map((m): ChatMessage => m.role === 'assistant'
+          ? {
+              role: 'assistant',
+              content: m.content,
+              ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+              ...(m.error ? { error: m.error } : {}),
+            }
+          : { role: 'user', content: m.content }))
+      } catch {
+        // Keep the streamed view if the reload fails.
+      }
+    }
+    await queryClient.invalidateQueries({ queryKey: ['character-chat-conversations', storyId] })
+  }, [storyId, queryClient])
+
+  const run = useRunStream({
+    storyId,
+    kind: 'character-chat',
+    scopeId: conversationId,
+    onEvent: handleEvent,
+    onSettled: handleSettled,
+  })
+  const isStreaming = run.isStreaming
+
   // Send a message
   const handleSend = useCallback(async () => {
     const text = input.trim()
@@ -155,14 +247,8 @@ export function CharacterChatView({ storyId, initialCharacterId, onClose }: Char
     setInput('')
     setError(null)
 
-    const userMessage: ChatMessage = { role: 'user', content: text }
-    const updatedMessages = [...messages, userMessage]
-    setMessages(updatedMessages)
-
-    // Add placeholder assistant message
-    const emptyAssistant: AssistantMessage = { role: 'assistant', content: '' }
-    setMessages([...updatedMessages, emptyAssistant])
-    setIsStreaming(true)
+    liveRef.current = { role: 'assistant', content: '' }
+    setMessages(prev => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
 
     try {
       // Create conversation on first message if needed
@@ -176,74 +262,17 @@ export function CharacterChatView({ storyId, initialCharacterId, onClose }: Char
         activeConvId = conv.id
         setConversationId(conv.id)
       }
+      conversationIdRef.current = activeConvId
 
-      // Build API messages (text only)
-      const apiMessages = updatedMessages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }))
-
-      const stream = await api.characterChat.chat(storyId, activeConvId, apiMessages)
-      const reader = stream.getReader()
-
-      let currentAssistant: AssistantMessage = { role: 'assistant', content: '' }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        const event: ChatEvent = value
-
-        switch (event.type) {
-          case 'text':
-            currentAssistant = {
-              ...currentAssistant,
-              content: currentAssistant.content + (event.text ?? ''),
-            }
-            break
-          case 'reasoning':
-            currentAssistant = {
-              ...currentAssistant,
-              reasoning: (currentAssistant.reasoning ?? '') + (event.text ?? ''),
-            }
-            break
-          case 'tool-call': {
-            const existing = currentAssistant.toolCalls ?? []
-            currentAssistant = {
-              ...currentAssistant,
-              toolCalls: [...existing, { id: event.id, toolName: event.toolName, args: event.args ?? {} }],
-            }
-            break
-          }
-          case 'tool-result': {
-            const calls = currentAssistant.toolCalls ?? []
-            currentAssistant = {
-              ...currentAssistant,
-              toolCalls: calls.map((tc) =>
-                tc.id === event.id ? { ...tc, result: event.result } : tc,
-              ),
-            }
-            break
-          }
-          case 'finish':
-            break
-        }
-
-        setMessages([...updatedMessages, currentAssistant])
-      }
-
-      setMessages([...updatedMessages, currentAssistant])
-
-      // Invalidate conversation list
-      await queryClient.invalidateQueries({ queryKey: ['character-chat-conversations', storyId] })
+      // Only the new message goes over the wire; the server holds the rest.
+      await run.start((clientRequestId) =>
+        api.characterChat.chat(storyId, activeConvId, text, clientRequestId))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Chat failed')
-      setMessages(updatedMessages)
     } finally {
-      setIsStreaming(false)
       textareaRef.current?.focus()
     }
-  }, [input, isStreaming, characterId, messages, conversationId, storyId, persona, storyPointId, queryClient])
+  }, [input, isStreaming, characterId, conversationId, storyId, persona, storyPointId, run])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {

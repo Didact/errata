@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type ChatEvent, type ChatHistory } from '@/lib/api'
+import { useRunStream } from '@/hooks/use-run-stream'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Send, Loader2 } from 'lucide-react'
+import { Send, Loader2, Square, PlugZap } from 'lucide-react'
 import { EmptyHint } from '@/components/ui/prose-text'
 import {
   AssistantMessageView,
@@ -19,11 +20,49 @@ function toLocalChatMessage(m: ChatHistory['messages'][number]): ChatMessage {
       content: m.content,
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.toolCalls?.length
-        ? { toolCalls: m.toolCalls.map((tc, i) => ({ id: `${i}`, toolName: tc.toolName, args: tc.args, result: tc.result })) }
+        ? {
+            toolCalls: m.toolCalls.map((tc, i) => ({
+              id: `${i}`,
+              toolName: tc.toolName,
+              args: tc.args,
+              result: tc.result,
+              ...(tc.error ? { error: tc.error } : {}),
+            })),
+          }
         : {}),
+      ...(m.error ? { error: m.error } : {}),
     }
   }
   return { role: 'user' as const, content: m.content }
+}
+
+/** Fold a live run event into the assistant message being built. */
+function applyEvent(msg: AssistantMessage, event: ChatEvent): AssistantMessage {
+  switch (event.type) {
+    case 'text':
+      return { ...msg, content: msg.content + event.text }
+    case 'reasoning':
+      return { ...msg, reasoning: (msg.reasoning ?? '') + event.text }
+    case 'tool-call':
+      return {
+        ...msg,
+        toolCalls: [...(msg.toolCalls ?? []), { id: event.id, toolName: event.toolName, args: event.args ?? {} }],
+      }
+    case 'tool-result':
+      return {
+        ...msg,
+        toolCalls: (msg.toolCalls ?? []).map(tc => tc.id === event.id ? { ...tc, result: event.result } : tc),
+      }
+    case 'tool-error':
+      return {
+        ...msg,
+        toolCalls: (msg.toolCalls ?? []).map(tc => tc.id === event.id ? { ...tc, error: event.error } : tc),
+      }
+    case 'error':
+      return { ...msg, error: event.error }
+    default:
+      return msg
+  }
 }
 
 interface LibrarianChatProps {
@@ -36,13 +75,79 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
   const queryClient = useQueryClient()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const initialInputAppliedRef = useRef<string | null>(null)
   const prevConversationIdRef = useRef<string | null | undefined>(undefined)
+  /** The assistant turn currently being streamed, kept outside React state. */
+  const liveRef = useRef<AssistantMessage | null>(null)
+
+  // Query key depends on whether we're in a conversation or legacy chat
+  const historyQueryKey = conversationId
+    ? ['librarian-conversation-history', storyId, conversationId]
+    : ['librarian-chat-history', storyId]
+
+  const refreshHistory = useCallback(async () => {
+    const refreshed = await queryClient.fetchQuery({
+      queryKey: historyQueryKey,
+      queryFn: () => conversationId
+        ? api.librarian.getConversationHistory(storyId, conversationId)
+        : api.librarian.getChatHistory(storyId),
+    })
+    setMessages(refreshed.messages.map(toLocalChatMessage))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, storyId, conversationId])
+
+  const handleEvent = useCallback((event: ChatEvent) => {
+    if (event.type === 'run-start') {
+      // A run we attached to (rather than started) has no local placeholder yet.
+      liveRef.current = { role: 'assistant', content: '' }
+      setMessages(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.role === 'assistant') return prev
+        return [...prev, { role: 'assistant', content: '' }]
+      })
+      return
+    }
+    if (event.type === 'run-end') return
+
+    const next = applyEvent(liveRef.current ?? { role: 'assistant', content: '' }, event)
+    liveRef.current = next
+    setMessages(prev => {
+      const copy = [...prev]
+      if (copy[copy.length - 1]?.role === 'assistant') copy[copy.length - 1] = next
+      else copy.push(next)
+      return copy
+    })
+  }, [])
+
+  const handleSettled = useCallback(async (status: string, message?: string) => {
+    liveRef.current = null
+    if (message) setError(message)
+    // The server is the record of what happened; replace local state with it
+    // rather than trusting the events we happened to receive.
+    try {
+      await refreshHistory()
+    } catch {
+      // Keep the streamed view if the refetch fails.
+    }
+    await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
+    if (conversationId) {
+      await queryClient.invalidateQueries({ queryKey: ['librarian-conversations', storyId] })
+    }
+    void status
+  }, [refreshHistory, queryClient, storyId, conversationId])
+
+  const run = useRunStream({
+    storyId,
+    kind: 'librarian.chat',
+    scopeId: conversationId ?? null,
+    onEvent: handleEvent,
+    onSettled: handleSettled,
+  })
+  const isStreaming = run.isStreaming
 
   // Reset state when conversationId changes
   useEffect(() => {
@@ -51,6 +156,7 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
       setMessages([])
       setLoaded(false)
       setError(null)
+      liveRef.current = null
     }
   }, [conversationId])
 
@@ -65,11 +171,6 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
       }, 0)
     }
   })
-
-  // Query key depends on whether we're in a conversation or legacy chat
-  const historyQueryKey = conversationId
-    ? ['librarian-conversation-history', storyId, conversationId]
-    : ['librarian-chat-history', storyId]
 
   // Load persisted chat history on mount
   const { data: chatHistory } = useQuery({
@@ -129,114 +230,24 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
     setInput('')
     setError(null)
 
-    const userMessage: ChatMessage = { role: 'user', content: text }
-    const updatedMessages = [...messages, userMessage]
-    setMessages(updatedMessages)
-
-    // Add placeholder assistant message for streaming
-    const emptyAssistant: AssistantMessage = { role: 'assistant', content: '' }
-    setMessages([...updatedMessages, emptyAssistant])
-    setIsStreaming(true)
-
-    let currentAssistant: AssistantMessage = { role: 'assistant', content: '' }
+    // Optimistically show the user turn and a placeholder for the reply. Both
+    // are replaced by the server's record once the run settles.
+    liveRef.current = { role: 'assistant', content: '' }
+    setMessages(prev => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
 
     try {
-      const stream = conversationId
-        ? await api.librarian.conversationChat(storyId, conversationId, text)
-        : await api.librarian.chat(storyId, text)
-      const reader = stream.getReader()
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        const event: ChatEvent = value
-
-        switch (event.type) {
-          case 'text':
-            currentAssistant = { ...currentAssistant, content: currentAssistant.content + (event.text ?? '') }
-            break
-          case 'reasoning':
-            currentAssistant = {
-              ...currentAssistant,
-              reasoning: (currentAssistant.reasoning ?? '') + (event.text ?? ''),
-            }
-            break
-          case 'tool-call': {
-            const existingCalls = currentAssistant.toolCalls ?? []
-            currentAssistant = {
-              ...currentAssistant,
-              toolCalls: [...existingCalls, { id: event.id, toolName: event.toolName, args: event.args ?? {} }],
-            }
-            break
-          }
-          case 'tool-result': {
-            const calls = currentAssistant.toolCalls ?? []
-            currentAssistant = {
-              ...currentAssistant,
-              toolCalls: calls.map(tc =>
-                tc.id === event.id ? { ...tc, result: event.result } : tc
-              ),
-            }
-            break
-          }
-          case 'tool-error': {
-            const calls = currentAssistant.toolCalls ?? []
-            currentAssistant = {
-              ...currentAssistant,
-              toolCalls: calls.map(tc =>
-                tc.id === event.id ? { ...tc, error: event.error } : tc
-              ),
-            }
-            break
-          }
-          case 'finish':
-            // Stream done
-            break
-        }
-
-        setMessages([...updatedMessages, currentAssistant])
-      }
-
-      setMessages([...updatedMessages, currentAssistant])
-
-      // The server is the durable record of this turn — refetch and replace
-      // local state with it rather than trusting our own accumulated array.
-      const refreshed = await queryClient.fetchQuery({
-        queryKey: historyQueryKey,
-        queryFn: () => conversationId
-          ? api.librarian.getConversationHistory(storyId, conversationId)
-          : api.librarian.getChatHistory(storyId),
-      })
-      setMessages(refreshed.messages.map(toLocalChatMessage))
-
-      // Invalidate fragment queries so sidebar lists update
-      await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
-      // Also invalidate conversation list so titles/timestamps refresh
-      if (conversationId) {
-        await queryClient.invalidateQueries({ queryKey: ['librarian-conversations', storyId] })
-      }
+      await run.start((clientRequestId) => conversationId
+        ? api.librarian.conversationChat(storyId, conversationId, text, clientRequestId)
+        : api.librarian.chat(storyId, text, clientRequestId))
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Chat failed'
-      setError(message)
-      // The user's message is persisted server-side before generation starts,
-      // so even on failure, refetch to reflect what actually survived.
-      try {
-        const refreshed = await queryClient.fetchQuery({
-          queryKey: historyQueryKey,
-          queryFn: () => conversationId
-            ? api.librarian.getConversationHistory(storyId, conversationId)
-            : api.librarian.getChatHistory(storyId),
-        })
-        setMessages(refreshed.messages.map(toLocalChatMessage))
-      } catch {
-        setMessages(updatedMessages)
-      }
+      setError(err instanceof Error ? err.message : 'Chat failed')
+      // The user turn is persisted server-side before generation starts, so
+      // refetch to show exactly what survived.
+      await refreshHistory().catch(() => {})
     } finally {
-      setIsStreaming(false)
       textareaRef.current?.focus()
     }
-  }, [input, isStreaming, messages, storyId, conversationId, queryClient, historyQueryKey])
+  }, [input, isStreaming, storyId, conversationId, run, refreshHistory])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -282,6 +293,17 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
             </div>
           ))}
 
+          {/* The run keeps going on the server; this is only about our link to it. */}
+          {run.isReconnecting && (
+            <div
+              className="flex items-center gap-1.5 text-[0.625rem] text-muted-foreground italic"
+              data-component-id="librarian-chat-reconnecting"
+            >
+              <PlugZap className="size-3 shrink-0" />
+              Reconnecting — the librarian is still working.
+            </div>
+          )}
+
           {error && (
             <div className="text-xs text-destructive bg-destructive/5 rounded-md p-2">
               {error}
@@ -306,6 +328,18 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
             rows={1}
             data-component-id="librarian-chat-input"
           />
+          {isStreaming && (
+            <Button
+              size="icon"
+              variant="outline"
+              className="size-8 shrink-0"
+              onClick={() => { void run.cancel() }}
+              title="Stop the librarian"
+              data-component-id="librarian-chat-stop"
+            >
+              <Square className="size-3.5" />
+            </Button>
+          )}
           <Button
             size="icon"
             className="size-8 shrink-0"

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Fragment, type ProseChainEntry } from '@/lib/api'
+import { consumeRun, type ConsumeRunResult } from '@/lib/api/runs'
+import type { SequencedChatEvent } from '@/lib/api/types'
 import { Button } from '@/components/ui/button'
 import { StreamMarkdown } from '@/components/ui/stream-markdown'
 import { ChevronRail } from './ChevronRail'
@@ -12,6 +14,64 @@ import { buildAnnotationHighlighter, formatDialogue, composeTextTransforms, stri
 import { RefreshCw, Undo2, PenLine, Bug, Trash2, GitBranch, MessageSquare, ChevronLeft, ChevronRight, Info, BookOpen, Volume2, Square } from 'lucide-react'
 import { Caption } from '@/components/ui/prose-text'
 import { useTtsSettings, useIsReadingFragment, playFragment, stopTts } from '@/lib/tts'
+
+/**
+ * Consume a regeneration run, feeding prose and thought steps to the UI.
+ *
+ * Shared by the three regenerate entry points (quick, action, prompt-edit).
+ * Goes through `consumeRun`, so a dropped connection resumes from the cursor
+ * rather than truncating the passage.
+ */
+async function streamProseAction(
+  storyId: string,
+  stream: ReadableStream<SequencedChatEvent>,
+  onText: (text: string) => void,
+  onSteps: (steps: ThoughtStep[]) => void,
+): Promise<ConsumeRunResult> {
+  let accumulated = ''
+  let accumulatedReasoning = ''
+  const steps: ThoughtStep[] = []
+  let stepsDirty = false
+  let rafScheduled = false
+
+  const result = await consumeRun(storyId, stream, (event) => {
+    if (event.type === 'text') {
+      accumulated += event.text
+    } else if (event.type === 'reasoning') {
+      accumulatedReasoning += event.text
+      const last = steps[steps.length - 1]
+      if (last && last.type === 'reasoning') {
+        last.text = accumulatedReasoning
+      } else {
+        steps.push({ type: 'reasoning', text: accumulatedReasoning })
+      }
+      stepsDirty = true
+    } else if (event.type === 'tool-call') {
+      accumulatedReasoning = ''
+      steps.push({ type: 'tool-call', id: event.id, toolName: event.toolName, args: event.args })
+      stepsDirty = true
+    } else if (event.type === 'tool-result') {
+      steps.push({ type: 'tool-result', id: event.id, toolName: event.toolName, result: event.result })
+      stepsDirty = true
+    }
+
+    if (!rafScheduled) {
+      rafScheduled = true
+      const snapshot = accumulated
+      const stepsSnapshot = stepsDirty ? [...steps] : null
+      stepsDirty = false
+      requestAnimationFrame(() => {
+        onText(snapshot)
+        if (stepsSnapshot) onSteps(stepsSnapshot)
+        rafScheduled = false
+      })
+    }
+  })
+
+  onText(accumulated)
+  if (steps.length > 0) onSteps([...steps])
+  return result
+}
 
 interface ProseBlockProps {
   storyId: string
@@ -212,50 +272,9 @@ export const ProseBlock = memo(function ProseBlock({
 
     try {
       const stream = await api.generation.regenerate(storyId, fragment.id, quickRegenerateInput)
-      const reader = stream.getReader()
-      let accumulated = ''
-      let accumulatedReasoning = ''
-      const steps: ThoughtStep[] = []
-      let stepsDirty = false
-      let rafScheduled = false
+      const result = await streamProseAction(storyId, stream, setStreamedActionText, setActionThoughtSteps)
+      if (result.status === 'error') throw new Error(result.error ?? 'Generation failed')
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
-        } else if (value.type === 'reasoning') {
-          accumulatedReasoning += value.text
-          const last = steps[steps.length - 1]
-          if (last && last.type === 'reasoning') {
-            last.text = accumulatedReasoning
-          } else {
-            steps.push({ type: 'reasoning', text: accumulatedReasoning })
-          }
-          stepsDirty = true
-        } else if (value.type === 'tool-call') {
-          accumulatedReasoning = ''
-          steps.push({ type: 'tool-call', id: value.id, toolName: value.toolName, args: value.args })
-          stepsDirty = true
-        } else if (value.type === 'tool-result') {
-          steps.push({ type: 'tool-result', id: value.id, toolName: value.toolName, result: value.result })
-          stepsDirty = true
-        }
-        if (!rafScheduled) {
-          rafScheduled = true
-          const snapshot = accumulated
-          const stepsSnapshot = stepsDirty ? [...steps] : null
-          stepsDirty = false
-          requestAnimationFrame(() => {
-            setStreamedActionText(snapshot)
-            if (stepsSnapshot) setActionThoughtSteps(stepsSnapshot)
-            rafScheduled = false
-          })
-        }
-      }
-
-      setStreamedActionText(accumulated)
-      if (steps.length > 0) setActionThoughtSteps([...steps])
       await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
       await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
       handleActionComplete()
@@ -278,50 +297,9 @@ export const ProseBlock = memo(function ProseBlock({
     try {
       const stream = await api.generation.regenerate(storyId, fragment.id, actionInput)
 
-      const reader = stream.getReader()
-      let accumulated = ''
-      let accumulatedReasoning = ''
-      const steps: ThoughtStep[] = []
-      let stepsDirty = false
-      let rafScheduled = false
+      const result = await streamProseAction(storyId, stream, setStreamedActionText, setActionThoughtSteps)
+      if (result.status === 'error') throw new Error(result.error ?? 'Generation failed')
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
-        } else if (value.type === 'reasoning') {
-          accumulatedReasoning += value.text
-          const last = steps[steps.length - 1]
-          if (last && last.type === 'reasoning') {
-            last.text = accumulatedReasoning
-          } else {
-            steps.push({ type: 'reasoning', text: accumulatedReasoning })
-          }
-          stepsDirty = true
-        } else if (value.type === 'tool-call') {
-          accumulatedReasoning = ''
-          steps.push({ type: 'tool-call', id: value.id, toolName: value.toolName, args: value.args })
-          stepsDirty = true
-        } else if (value.type === 'tool-result') {
-          steps.push({ type: 'tool-result', id: value.id, toolName: value.toolName, result: value.result })
-          stepsDirty = true
-        }
-        if (!rafScheduled) {
-          rafScheduled = true
-          const snapshot = accumulated
-          const stepsSnapshot = stepsDirty ? [...steps] : null
-          stepsDirty = false
-          requestAnimationFrame(() => {
-            setStreamedActionText(snapshot)
-            if (stepsSnapshot) setActionThoughtSteps(stepsSnapshot)
-            rafScheduled = false
-          })
-        }
-      }
-
-      setStreamedActionText(accumulated)
-      if (steps.length > 0) setActionThoughtSteps([...steps])
       await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
       await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
       handleActionComplete()
@@ -353,50 +331,9 @@ export const ProseBlock = memo(function ProseBlock({
 
     try {
       const stream = await api.generation.regenerate(storyId, fragment.id, actionInput)
-      const reader = stream.getReader()
-      let accumulated = ''
-      let accumulatedReasoning = ''
-      const steps: ThoughtStep[] = []
-      let stepsDirty = false
-      let rafScheduled = false
+      const result = await streamProseAction(storyId, stream, setStreamedActionText, setActionThoughtSteps)
+      if (result.status === 'error') throw new Error(result.error ?? 'Generation failed')
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
-        } else if (value.type === 'reasoning') {
-          accumulatedReasoning += value.text
-          const last = steps[steps.length - 1]
-          if (last && last.type === 'reasoning') {
-            last.text = accumulatedReasoning
-          } else {
-            steps.push({ type: 'reasoning', text: accumulatedReasoning })
-          }
-          stepsDirty = true
-        } else if (value.type === 'tool-call') {
-          accumulatedReasoning = ''
-          steps.push({ type: 'tool-call', id: value.id, toolName: value.toolName, args: value.args })
-          stepsDirty = true
-        } else if (value.type === 'tool-result') {
-          steps.push({ type: 'tool-result', id: value.id, toolName: value.toolName, result: value.result })
-          stepsDirty = true
-        }
-        if (!rafScheduled) {
-          rafScheduled = true
-          const snapshot = accumulated
-          const stepsSnapshot = stepsDirty ? [...steps] : null
-          stepsDirty = false
-          requestAnimationFrame(() => {
-            setStreamedActionText(snapshot)
-            if (stepsSnapshot) setActionThoughtSteps(stepsSnapshot)
-            rafScheduled = false
-          })
-        }
-      }
-
-      setStreamedActionText(accumulated)
-      if (steps.length > 0) setActionThoughtSteps([...steps])
       await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
       await queryClient.invalidateQueries({ queryKey: ['proseChain', storyId] })
       handleActionComplete()
