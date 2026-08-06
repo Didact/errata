@@ -84,6 +84,21 @@ The response also sets `X-Run-Id` (reattach without parsing the body) and
 `X-Accel-Buffering: no` (stop a reverse proxy from holding the whole NDJSON body
 until the generation finishes, which looks exactly like a hang).
 
+### Keepalive
+
+A subscriber that sits silent for 5s gets a blank line. Generations routinely go
+tens of seconds without emitting — model latency on a large context, a slow tool
+— and anything between the phone and the server that tracks idleness will drop
+such a connection: carrier NAT, tunnels, corporate proxies. The client recovers
+by reattaching, but the author sees a needless "reconnecting" mid-answer.
+
+A blank line is valid NDJSON padding that both client parsers already skip, so
+it costs no protocol change and consumes no `seq`.
+
+Note this guards the *network* path, not the runtime: Nitro bundles srvx's Node
+adapter, and Node's http server imposes no idle timeout on a streaming response
+(verified by holding one silent for 20s with keepalives disabled).
+
 ## Endpoints
 
 | Method | Path | Purpose |

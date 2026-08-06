@@ -275,6 +275,101 @@ describe('run registry', () => {
     expect(findRunByClientRequestId(STORY_ID, 'req-abc')?.id).toBe(run.id)
   })
 
+  /**
+   * A generation can go a long time without emitting. Anything between the
+   * phone and the server — carrier NAT, a tunnel, a reverse proxy — will drop
+   * a connection it thinks is idle, which surfaces to the author as a spurious
+   * "reconnecting" mid-generation.
+   */
+  it('sends keepalive padding so an idle stream is not dropped', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = deferred()
+      const run = await startRun({
+        dataDir,
+        storyId: STORY_ID,
+        kind: 'librarian.chat',
+        scopeId: 'conv-idle',
+        body: async ({ emit }) => {
+          emit({ type: 'text', text: 'thinking' })
+          await gate.promise
+          emit({ type: 'finish', finishReason: 'stop', stepCount: 1 })
+        },
+      })
+
+      const reader = subscribeRun(run.id, 0)!.getReader()
+      const chunks: string[] = []
+
+      // Drain run-start + the first text event.
+      await vi.advanceTimersByTimeAsync(100)
+      chunks.push((await reader.read()).value!)
+      chunks.push((await reader.read()).value!)
+
+      // Now go quiet past the keepalive window.
+      const pending = reader.read()
+      await vi.advanceTimersByTimeAsync(16_000)
+      const keepalive = await pending
+
+      // Padding only — no event, so the cursor is untouched.
+      expect(keepalive.value).toBe('\n')
+      expect(keepalive.value!.trim()).toBe('')
+
+      gate.resolve()
+      await vi.advanceTimersByTimeAsync(100)
+      await run.done
+
+      // The real events still arrive, correctly sequenced.
+      const rest: string[] = []
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value.trim()) rest.push(value)
+      }
+      const parsed = rest.map(l => JSON.parse(l.trim()))
+      expect(parsed.at(-1)).toMatchObject({ type: 'run-end', status: 'complete' })
+
+      const all = [...chunks, ...rest].filter(c => c.trim()).map(l => JSON.parse(l.trim()))
+      expect(all.map(e => e.seq)).toEqual(all.map((_, i) => i))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not leak a waiter per keepalive tick', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = deferred()
+      const run = await startRun({
+        dataDir,
+        storyId: STORY_ID,
+        kind: 'librarian.chat',
+        scopeId: 'conv-leak',
+        body: async () => { await gate.promise },
+      })
+
+      const reader = subscribeRun(run.id, 0)!.getReader()
+      await vi.advanceTimersByTimeAsync(100)
+      await reader.read() // run-start
+
+      // Several quiet keepalive cycles.
+      for (let i = 0; i < 5; i++) {
+        const pending = reader.read()
+        await vi.advanceTimersByTimeAsync(16_000)
+        await pending
+      }
+
+      // A timed-out waiter must remove itself rather than pile up.
+      expect(run.waiters.length).toBeLessThanOrEqual(1)
+
+      gate.resolve()
+      await vi.advanceTimersByTimeAsync(100)
+      await run.done
+      await reader.cancel()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('returns null for an unknown run', () => {
     expect(getRun('run-nope')).toBeNull()
     expect(subscribeRun('run-nope', 0)).toBeNull()

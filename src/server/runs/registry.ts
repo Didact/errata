@@ -39,6 +39,26 @@ const BATCH_FLUSH_MS = 50
 /** Safety cap on a single run's retained event log. */
 const MAX_EVENTS = 20_000
 
+/**
+ * How long a subscriber may sit silent before a blank keepalive line is sent.
+ *
+ * A generation routinely goes tens of seconds without emitting — model latency
+ * on a large context, a slow tool. Anything between the phone and the server
+ * that tracks idleness will drop such a connection: carrier NAT (commonly
+ * 30s–2min), Cloudflare tunnels, corporate proxies. The client recovers by
+ * reattaching, but the author sees a needless "reconnecting" mid-answer.
+ *
+ * Measured: our own stack does *not* impose one. Nitro bundles srvx's Node
+ * adapter (`.output/server/_libs/srvx.mjs` contains no `Bun.serve`), and Node's
+ * http server has no idle timeout for a streaming response — verified by
+ * holding a response silent for 20s with keepalives disabled. So this guards
+ * the network path, not the runtime.
+ *
+ * 5s is well under the tightest window we might meet and costs one byte per
+ * idle subscriber per interval.
+ */
+const KEEPALIVE_MS = 5_000
+
 export interface Run {
   id: string
   storyId: string
@@ -362,12 +382,46 @@ export function subscribeRun(runId: string, cursor = 0): ReadableStream<string> 
           return
         }
 
-        // Nothing buffered and still running — wait to be woken.
-        await new Promise<void>((resolve) => {
-          run.waiters.push(resolve)
-        })
+        // Nothing buffered and still running — wait to be woken, but never sit
+        // silent for long. A generation can go a while without emitting (model
+        // latency, a slow tool), and anything between the phone and the server
+        // — carrier NAT, a Cloudflare tunnel, a reverse proxy — will drop a TCP
+        // connection it thinks has gone idle. That surfaces as a spurious
+        // "reconnecting" mid-generation. A blank line is valid NDJSON padding
+        // that both client parsers already skip, so it keeps the socket warm
+        // without touching the cursor or the protocol.
+        const woken = await waitForEvent(run)
+        if (!woken) controller.enqueue('\n')
       }
     },
+  })
+}
+
+/**
+ * Wait for the run to emit, or for the keepalive interval to elapse.
+ * Resolves true if woken by an event, false on the keepalive timeout.
+ */
+function waitForEvent(run: Run): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      const idx = run.waiters.indexOf(waiter)
+      if (idx !== -1) run.waiters.splice(idx, 1)
+      resolve(false)
+    }, KEEPALIVE_MS)
+    ;(timer as { unref?: () => void }).unref?.()
+
+    const waiter = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(true)
+    }
+
+    run.waiters.push(waiter)
   })
 }
 
