@@ -655,7 +655,7 @@ export function generationRoutes(dataDir: string) {
                 ...(prewriterBrief ? { prewriterBrief } : {}),
                 ...(prewriterReasoning ? { prewriterReasoning } : {}),
                 ...(prewriterLogMessages ? { prewriterMessages: prewriterLogMessages } : {}),
-                ...(prewriterDurationMs ? { prewriterDurationMs } : {}),
+                ...(prewriterDurationMs !== undefined ? { prewriterDurationMs } : {}),
                 ...(prewriterModel ? { prewriterModel } : {}),
                 ...(prewriterUsage ? { prewriterUsage } : {}),
                 ...(prewriterDirections?.length ? { prewriterDirections } : {}),
