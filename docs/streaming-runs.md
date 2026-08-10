@@ -47,6 +47,12 @@ POST /stories/:id/librarian/chat          →  startRun() ──┐
 - Consecutive text/reasoning deltas are coalesced for ~50ms *before* being
   assigned a `seq`, so sequence numbers are immutable once emitted and a
   subscriber can never miss text appended to an event it already delivered.
+- The event log is capped (`MAX_EVENTS`), but **terminal events are never
+  dropped**. A missing `run-end` would close every subscriber's stream with no
+  terminal event, which the client correctly reads as a disconnect and retries
+  forever. Truncating a pathological run's live view is acceptable; stranding
+  the client is not. The stored turn is unaffected either way — it comes from
+  the turn tracker, not this log.
 - Finished runs are retained for 10 minutes so a phone that wakes up late can
   still pull the tail.
 
@@ -158,7 +164,11 @@ Both dedupe by `seq` so replay after a reconnect can't double-apply anything.
   without this the user waits out the backoff every time they return to the app,
   which on a phone is constantly.
 - Persists `runId` + cursor in `sessionStorage`, so a page reload reattaches.
-- On mount, attaches to any live run matching its `(kind, scopeId)`.
+- On mount, attaches to any live run matching its `(kind, scopeId)`. Matching
+  **both** matters: a null `scopeId` can't be expressed as a query param, so the
+  server returns every active run for the story and the client filters.
+- On a `409`, attaches to the run whose id the server returned rather than
+  erroring — that's what the id is for.
 
 A `404` from the events endpoint means the run aged out of the registry, so both
 stop retrying and surface it rather than looping.
@@ -176,6 +186,10 @@ stop retrying and surface it rather than looping.
 Streaming agents return `AgentStreamResult` — `{ run(onEvent), cancel() }` — so
 the run layer decides when the generation runs and where its events go. Never
 hand a consumer something that can stop the producer.
+
+`consumeAgentStream` must handle the AI SDK's `error` and `abort` stream parts:
+the SDK reports a provider or transport failure as a *part*, not by rejecting
+the iterator. Ignoring it records a failed generation as a successful empty one.
 
 ## Tests
 
