@@ -370,6 +370,81 @@ describe('run registry', () => {
     }
   })
 
+  /**
+   * The event log is capped, but dropping `run-end` would close every
+   * subscriber's stream with no terminal event — which the client correctly
+   * reads as a disconnect and retries forever. Truncating a pathological run's
+   * live view is fine; stranding the client is not.
+   */
+  it('always emits a terminal event, even past the event-log cap', async () => {
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'generation',
+      body: async ({ emit }) => {
+        // Blow well past MAX_EVENTS (20k) with non-batchable events.
+        for (let i = 0; i < 20_050; i++) {
+          emit({ type: 'tool-call', id: `t${i}`, toolName: 'noop', args: {} })
+        }
+      },
+    })
+    await run.done
+
+    const events = await drain(subscribeRun(run.id, 0)!)
+    expect(events.length).toBeLessThanOrEqual(20_001)
+    // The critical part: the client still learns the run is over.
+    expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'complete' })
+    expect(run.truncated).toBe(true)
+  })
+
+  it('records a terminal error past the cap too', async () => {
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'generation',
+      body: async ({ emit }) => {
+        for (let i = 0; i < 20_050; i++) {
+          emit({ type: 'tool-call', id: `t${i}`, toolName: 'noop', args: {} })
+        }
+        throw new Error('exploded after the cap')
+      },
+    })
+    await run.done
+
+    const events = await drain(subscribeRun(run.id, 0)!)
+    expect(events.find(e => e.type === 'error')).toMatchObject({ error: 'exploded after the cap' })
+    expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'error' })
+  })
+
+  it('stops its subscriber loop when the consumer hangs up', async () => {
+    const gate = deferred()
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'librarian.chat',
+      scopeId: 'conv-hangup',
+      body: async ({ emit }) => {
+        emit({ type: 'text', text: 'hello' })
+        await gate.promise
+        emit({ type: 'finish', finishReason: 'stop', stepCount: 1 })
+      },
+    })
+
+    const reader = subscribeRun(run.id, 0)!.getReader()
+    await reader.read()
+    await reader.cancel()
+
+    // The abandoned subscriber must not keep parking on the waiter list.
+    await new Promise(r => setTimeout(r, 30))
+    const waitersAfterCancel = run.waiters.length
+
+    gate.resolve()
+    await run.done
+
+    expect(waitersAfterCancel).toBe(0)
+    expect(run.status).toBe('complete')
+  })
+
   it('returns null for an unknown run', () => {
     expect(getRun('run-nope')).toBeNull()
     expect(subscribeRun('run-nope', 0)).toBeNull()

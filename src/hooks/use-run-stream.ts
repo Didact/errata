@@ -241,13 +241,36 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
       const terminal = await consume(stream, epoch)
       if (!terminal && epoch === epochRef.current) scheduleReconnect()
     } catch (err) {
+      // A 409 means a turn is already running for this surface and the server
+      // handed back its id precisely so we can watch it instead of racing it
+      // (another tab, or a resend the UI didn't manage to block). Attaching is
+      // the whole reason that id is in the response.
+      const conflictRunId = (err as { status?: number; data?: { runId?: unknown } })?.status === 409
+        ? (err as { data?: { runId?: unknown } }).data?.runId
+        : undefined
+
+      if (typeof conflictRunId === 'string') {
+        runIdRef.current = conflictRunId
+        cursorRef.current = 0
+        setRunId(conflictRunId)
+        try {
+          const stream = await api.runs.events(storyId, conflictRunId, 0)
+          const terminal = await consume(stream, epoch)
+          if (!terminal && epoch === epochRef.current) scheduleReconnect()
+          return
+        } catch {
+          scheduleReconnect()
+          return
+        }
+      }
+
       // The POST itself failed, so no run exists to reattach to.
       settledRef.current = true
       const message = err instanceof Error ? err.message : 'Request failed'
       settle('error', message)
       throw err
     }
-  }, [clearReconnectTimer, consume, scheduleReconnect, settle])
+  }, [clearReconnectTimer, consume, scheduleReconnect, settle, storyId])
 
   const cancel = useCallback(async () => {
     const currentRunId = runIdRef.current
@@ -294,7 +317,11 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
         }
         if (!targetRunId) {
           const active = await api.runs.list(storyId, { active: true, scopeId })
-          const match = active.find(r => r.kind === kind)
+          // Match the scope too. A null scopeId can't be expressed as a query
+          // param, so the server returns every active run for the story —
+          // without this check the legacy chat would latch onto a
+          // conversation's run, and the "new prose" view onto a regeneration.
+          const match = active.find(r => r.kind === kind && r.scopeId === scopeId)
           if (match) {
             targetRunId = match.id
             // No stored cursor for this client — replay the run from the top.

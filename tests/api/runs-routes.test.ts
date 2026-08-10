@@ -489,6 +489,52 @@ describe('run routes', () => {
     expect(mockAgentStream).toHaveBeenCalledTimes(1)
   })
 
+  /**
+   * The AI SDK reports a provider/transport failure as an `error` *part* in
+   * fullStream rather than by rejecting the iterator. Ignoring that part
+   * recorded a failed turn as `status: 'complete'` with empty content — a
+   * blank reply indistinguishable from the model choosing to say nothing.
+   */
+  it('fails the turn when the provider errors mid-stream', async () => {
+    mockAgentStream.mockResolvedValue({
+      fullStream: (async function* () {
+        yield { type: 'tool-call', toolCallId: 't1', toolName: 'updateFragment', input: { id: 'ch-1' } }
+        yield { type: 'tool-result', toolCallId: 't1', toolName: 'updateFragment', output: { ok: true } }
+        yield { type: 'error', error: new Error('connection reset by provider') }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    })
+
+    const events = await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Go' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    expect(events.find(e => e.type === 'error')).toMatchObject({ error: 'connection reset by provider' })
+    expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'error' })
+
+    const turn = (await getChatHistory(dataDir, STORY_ID)).messages[1]
+    expect(turn.status).toBe('error')
+    expect(turn.error).toBe('connection reset by provider')
+    // The edit that did land is still on the record, so the next turn won't redo it.
+    expect(turn.toolCalls).toEqual([expect.objectContaining({ toolName: 'updateFragment' })])
+  })
+
+  it('treats an abort part as a clean stop, not a failure', async () => {
+    mockAgentStream.mockResolvedValue({
+      fullStream: (async function* () {
+        yield { type: 'text-delta', text: 'Partial' }
+        yield { type: 'abort', reason: 'cancelled' }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    })
+
+    const events = await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Go' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    // No error event — an abort is not a provider failure.
+    expect(events.some(e => e.type === 'error')).toBe(false)
+    expect((await getChatHistory(dataDir, STORY_ID)).messages[1].content).toBe('Partial')
+  })
+
   it('404s for an unknown run', async () => {
     expect((await get(`/stories/${STORY_ID}/runs/run-nope`)).status).toBe(404)
     expect((await get(`/stories/${STORY_ID}/runs/run-nope/events?cursor=0`)).status).toBe(404)

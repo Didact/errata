@@ -160,6 +160,26 @@ describe('consumeRun', () => {
     expect(result).toEqual({ runId: 'run-1', status: 'cancelled' })
   })
 
+  it('carries the status through so a 409 conflict is distinguishable', async () => {
+    // `useRunStream` branches on `status === 409` to attach to the live run
+    // instead of erroring, which only works if the stream fetchers throw
+    // ApiError rather than a bare Error.
+    const { ApiError, fetchEventStream } = await import('@/lib/api/client')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'A chat turn is already running', runId: 'run-live' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ))
+
+    const err = await fetchEventStream('/stories/s/librarian/chat', { message: 'hi' })
+      .then(() => null, (e: unknown) => e)
+
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as InstanceType<typeof ApiError>).status).toBe(409)
+    expect((err as InstanceType<typeof ApiError>).data.runId).toBe('run-live')
+  })
+
   it('gives up when the stream dies before a run id is known', async () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)

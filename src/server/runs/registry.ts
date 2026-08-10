@@ -79,6 +79,8 @@ export interface Run {
   /** Woken whenever events are appended or the status changes. */
   waiters: Array<() => void>
   abortController: AbortController
+  /** Set once the event log hit its cap, so the warning is logged only once. */
+  truncated?: boolean
   /** Pending coalesced text, not yet assigned a seq. */
   pending: { type: string; text: string } | null
   pendingTimer: ReturnType<typeof setTimeout> | null
@@ -105,9 +107,33 @@ function wake(run: Run): void {
   }
 }
 
-/** Append an event to the log with the next seq. Never throws. */
+/** Terminal events tell a client "this run is over" rather than "you disconnected". */
+function isTerminal(event: ServerRunEvent): boolean {
+  return event.type === 'run-end' || event.type === 'error'
+}
+
+/**
+ * Append an event to the log with the next seq. Never throws.
+ *
+ * The {@link MAX_EVENTS} cap never applies to terminal events. Dropping a
+ * `run-end` would leave every subscriber reading a stream that closes with no
+ * terminal event — which the client, correctly, reads as a dropped connection
+ * and retries forever. Truncating the live view of a pathological run is
+ * acceptable; stranding the client is not. (The stored turn is unaffected: it
+ * comes from the turn tracker, not this log.)
+ */
 function append(run: Run, event: ServerRunEvent): void {
-  if (run.events.length >= MAX_EVENTS) return
+  if (run.events.length >= MAX_EVENTS && !isTerminal(event)) {
+    if (!run.truncated) {
+      run.truncated = true
+      logger.warn('Run event log hit its cap; live view will truncate', {
+        runId: run.id,
+        kind: run.kind,
+        cap: MAX_EVENTS,
+      })
+    }
+    return
+  }
   run.events.push({ ...event, seq: run.events.length } as SequencedRunEvent)
   wake(run)
 }
@@ -369,13 +395,25 @@ export function subscribeRun(runId: string, cursor = 0): ReadableStream<string> 
   flushPending(run)
 
   let position = Math.max(0, cursor)
+  let closed = false
+  /** Unparks an in-flight keepalive wait when the consumer disconnects. */
+  let release: (() => void) | null = null
 
   return new ReadableStream<string>({
+    // The consumer went away. Break the loop below so it stops parking on
+    // waiters and never enqueues into a dead controller — the run itself is
+    // deliberately untouched.
+    cancel() {
+      closed = true
+      release?.()
+    },
+
     async pull(controller) {
-      while (true) {
-        while (position < run.events.length) {
+      while (!closed) {
+        while (!closed && position < run.events.length) {
           controller.enqueue(JSON.stringify(run.events[position++]) + '\n')
         }
+        if (closed) return
 
         if (run.status !== 'running') {
           controller.close()
@@ -390,7 +428,9 @@ export function subscribeRun(runId: string, cursor = 0): ReadableStream<string> 
         // "reconnecting" mid-generation. A blank line is valid NDJSON padding
         // that both client parsers already skip, so it keeps the socket warm
         // without touching the cursor or the protocol.
-        const woken = await waitForEvent(run)
+        const woken = await waitForEvent(run, (fn) => { release = fn })
+        release = null
+        if (closed) return
         if (!woken) controller.enqueue('\n')
       }
     },
@@ -398,30 +438,34 @@ export function subscribeRun(runId: string, cursor = 0): ReadableStream<string> 
 }
 
 /**
- * Wait for the run to emit, or for the keepalive interval to elapse.
- * Resolves true if woken by an event, false on the keepalive timeout.
+ * Wait for the run to emit, for the keepalive interval to elapse, or for the
+ * subscriber to be released. Resolves true only if woken by an actual event.
+ *
+ * `registerRelease` hands the caller a function that unparks this wait early —
+ * used when the consumer disconnects, so the waiter is dropped immediately
+ * instead of lingering on the run's list until the next keepalive tick.
  */
-function waitForEvent(run: Run): Promise<boolean> {
+function waitForEvent(run: Run, registerRelease: (release: () => void) => void): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false
+    let timer: ReturnType<typeof setTimeout>
 
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      const idx = run.waiters.indexOf(waiter)
-      if (idx !== -1) run.waiters.splice(idx, 1)
-      resolve(false)
-    }, KEEPALIVE_MS)
-    ;(timer as { unref?: () => void }).unref?.()
-
-    const waiter = () => {
+    const finish = (woken: boolean) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve(true)
+      const idx = run.waiters.indexOf(waiter)
+      if (idx !== -1) run.waiters.splice(idx, 1)
+      resolve(woken)
     }
 
+    const waiter = () => finish(true)
+
+    timer = setTimeout(() => finish(false), KEEPALIVE_MS)
+    ;(timer as { unref?: () => void }).unref?.()
+
     run.waiters.push(waiter)
+    registerRelease(() => finish(false))
   })
 }
 

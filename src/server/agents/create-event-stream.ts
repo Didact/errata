@@ -29,6 +29,7 @@ export async function consumeAgentStream(
   const toolCallArgs = new Map<string, Record<string, unknown>>()
   let lastFinishReason = 'unknown'
   let stepCount = 0
+  let aborted = false
 
   for await (const part of fullStream) {
     let event: AgentStreamEvent | null = null
@@ -36,6 +37,21 @@ export async function consumeAgentStream(
     const type = (p as { type?: string }).type
 
     switch (type) {
+      // The AI SDK reports a provider/transport failure as a stream *part*,
+      // not by rejecting the iterator. Swallowing it records a failed turn as
+      // a successful empty one — a blank reply the author can't distinguish
+      // from the model choosing to say nothing. Throw so the run ends 'error'
+      // with whatever text and tool calls did land.
+      case 'error': {
+        const raw = p.error
+        throw raw instanceof Error ? raw : new Error(String(raw))
+      }
+      // The underlying call was aborted (an explicit cancel). Stop consuming;
+      // the run layer derives the final status from the abort signal.
+      case 'abort':
+        aborted = true
+        break
+
       case 'text-delta': {
         const text = (p.text ?? '') as string
         fullText += text
@@ -97,6 +113,7 @@ export async function consumeAgentStream(
     if (event) {
       onEvent(event)
     }
+    if (aborted) break
   }
 
   onEvent({ type: 'finish', finishReason: lastFinishReason, stepCount })
