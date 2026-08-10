@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type ChatEvent } from '@/lib/api'
+import { api, type ChatEvent, type ChatHistory } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -11,6 +11,20 @@ import {
   type AssistantMessage,
   type ChatMessage,
 } from '@/components/chat/ChatMessageParts'
+
+function toLocalChatMessage(m: ChatHistory['messages'][number]): ChatMessage {
+  if (m.role === 'assistant') {
+    return {
+      role: 'assistant' as const,
+      content: m.content,
+      ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+      ...(m.toolCalls?.length
+        ? { toolCalls: m.toolCalls.map((tc, i) => ({ id: `${i}`, toolName: tc.toolName, args: tc.args, result: tc.result })) }
+        : {}),
+    }
+  }
+  return { role: 'user' as const, content: m.content }
+}
 
 interface LibrarianChatProps {
   storyId: string
@@ -69,19 +83,7 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
   useEffect(() => {
     if (chatHistory && !loaded && !isStreaming) {
       if (chatHistory.messages.length > 0) {
-        setMessages(chatHistory.messages.map((m): ChatMessage => {
-          if (m.role === 'assistant') {
-            return {
-              role: 'assistant' as const,
-              content: m.content,
-              ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-              ...(m.toolCalls?.length
-                ? { toolCalls: m.toolCalls.map((tc, i) => ({ id: `${i}`, toolName: tc.toolName, args: tc.args, result: tc.result })) }
-                : {}),
-            }
-          }
-          return { role: 'user' as const, content: m.content }
-        }))
+        setMessages(chatHistory.messages.map(toLocalChatMessage))
       }
       setLoaded(true)
     }
@@ -139,15 +141,9 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
     let currentAssistant: AssistantMessage = { role: 'assistant', content: '' }
 
     try {
-      // Send only text content for the API (history doesn't include tool calls)
-      const apiMessages = updatedMessages.map(m => ({
-        role: m.role,
-        content: m.content,
-      }))
-
       const stream = conversationId
-        ? await api.librarian.conversationChat(storyId, conversationId, apiMessages)
-        : await api.librarian.chat(storyId, apiMessages)
+        ? await api.librarian.conversationChat(storyId, conversationId, text)
+        : await api.librarian.chat(storyId, text)
       const reader = stream.getReader()
 
       while (true) {
@@ -204,9 +200,18 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
 
       setMessages([...updatedMessages, currentAssistant])
 
+      // The server is the durable record of this turn — refetch and replace
+      // local state with it rather than trusting our own accumulated array.
+      const refreshed = await queryClient.fetchQuery({
+        queryKey: historyQueryKey,
+        queryFn: () => conversationId
+          ? api.librarian.getConversationHistory(storyId, conversationId)
+          : api.librarian.getChatHistory(storyId),
+      })
+      setMessages(refreshed.messages.map(toLocalChatMessage))
+
       // Invalidate fragment queries so sidebar lists update
       await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })
-      await queryClient.invalidateQueries({ queryKey: historyQueryKey })
       // Also invalidate conversation list so titles/timestamps refresh
       if (conversationId) {
         await queryClient.invalidateQueries({ queryKey: ['librarian-conversations', storyId] })
@@ -214,13 +219,19 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Chat failed'
       setError(message)
-      // Keep whatever text/reasoning/tool calls already streamed through (and
-      // already executed server-side) instead of discarding the whole turn —
-      // those tool calls may have already mutated fragments.
-      const hasProgress = currentAssistant.content || currentAssistant.reasoning || currentAssistant.toolCalls?.length
-      setMessages(hasProgress
-        ? [...updatedMessages, { ...currentAssistant, error: message }]
-        : updatedMessages)
+      // The user's message is persisted server-side before generation starts,
+      // so even on failure, refetch to reflect what actually survived.
+      try {
+        const refreshed = await queryClient.fetchQuery({
+          queryKey: historyQueryKey,
+          queryFn: () => conversationId
+            ? api.librarian.getConversationHistory(storyId, conversationId)
+            : api.librarian.getChatHistory(storyId),
+        })
+        setMessages(refreshed.messages.map(toLocalChatMessage))
+      } catch {
+        setMessages(updatedMessages)
+      }
     } finally {
       setIsStreaming(false)
       textareaRef.current?.focus()
