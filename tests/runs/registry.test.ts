@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createTempDir, makeTestSettings } from '../setup'
 import { createStory } from '@/server/fragments/storage'
 import {
@@ -443,6 +443,121 @@ describe('run registry', () => {
 
     expect(waitersAfterCancel).toBe(0)
     expect(run.status).toBe('complete')
+  })
+
+  /**
+   * Nothing else bounds a run. A provider that stops producing without closing
+   * the connection leaves `consumeAgentStream` waiting on an iterator that
+   * never yields, and the keepalive holds the socket open — so the author
+   * watches a spinner indefinitely instead of getting an actionable error.
+   */
+  it('stops a run that never finishes, instead of spinning forever', async () => {
+    vi.useFakeTimers()
+    try {
+      const run = await startRun({
+        dataDir,
+        storyId: STORY_ID,
+        kind: 'librarian.chat',
+        scopeId: 'conv-wedged',
+        body: async ({ emit }) => {
+          emit({ type: 'text', text: 'starting' })
+          // A provider that accepted the request and then went silent forever.
+          await new Promise<never>(() => {})
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(run.status).toBe('running')
+
+      // Past the 10 minute limit.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+
+      expect(run.status).toBe('error')
+      expect(run.error).toContain('exceeded')
+      expect(run.abortController.signal.aborted).toBe(true)
+
+      const events = await drain(subscribeRun(run.id, 0)!)
+      expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'error' })
+      // The partial text still made it out.
+      expect(events.some(e => e.type === 'text')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the watchdog when a run finishes normally', async () => {
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'librarian.chat',
+      scopeId: 'conv-normal',
+      body: async ({ emit }) => { emit({ type: 'text', text: 'done' }) },
+    })
+    await run.done
+    expect(run.status).toBe('complete')
+    expect(run.watchdogTimer).toBeNull()
+  })
+
+  /**
+   * Pressing Stop must land even when the generation ignores its abort signal —
+   * otherwise the author clicks Stop and watches the same spinner, which reads
+   * as the button doing nothing.
+   */
+  it('finishes a cancelled run even if the body ignores the abort', async () => {
+    vi.useFakeTimers()
+    try {
+      const run = await startRun({
+        dataDir,
+        storyId: STORY_ID,
+        kind: 'librarian.chat',
+        scopeId: 'conv-stubborn',
+        body: async ({ emit }) => {
+          emit({ type: 'text', text: 'working' })
+          // Deliberately never observes `signal`.
+          await new Promise<never>(() => {})
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(50)
+      expect(cancelRun(run.id)).toBe(true)
+
+      // Still running immediately after — the body was only *asked* to stop.
+      expect(run.status).toBe('running')
+
+      await vi.advanceTimersByTimeAsync(6_000)
+
+      expect(run.status).toBe('cancelled')
+      const events = await drain(subscribeRun(run.id, 0)!)
+      expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'cancelled' })
+      // A cancel is not a failure.
+      expect(events.some(e => e.type === 'error')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not wait out the grace period when the body stops promptly', async () => {
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'librarian.chat',
+      scopeId: 'conv-polite',
+      body: async ({ emit, signal }) => {
+        emit({ type: 'text', text: 'working' })
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      },
+    })
+
+    await new Promise(r => setTimeout(r, 20))
+    const t0 = Date.now()
+    cancelRun(run.id)
+    await run.done
+
+    expect(run.status).toBe('cancelled')
+    // Settled on the body's own unwind, not the 5s grace timer.
+    expect(Date.now() - t0).toBeLessThan(1000)
   })
 
   it('returns null for an unknown run', () => {

@@ -19,6 +19,7 @@
 
 import { withBranch, getActiveBranchId } from '../fragments/branches'
 import { createLogger } from '../logging'
+import { describeError } from '../error-message'
 import {
   BATCHABLE_EVENT_TYPES,
   type RunKind,
@@ -33,11 +34,40 @@ const logger = createLogger('runs')
 /** How long a finished run stays readable, so a phone that wakes up late can still pull the tail. */
 const RETENTION_MS = 10 * 60 * 1000
 
-/** How long consecutive text deltas accumulate before being flushed as one event. */
-const BATCH_FLUSH_MS = 50
+/**
+ * How long consecutive text deltas accumulate before being flushed as one event.
+ *
+ * Roughly one animation frame. The client repaints at 60fps at best, so
+ * coalescing below this is invisible — while anything much above it makes text
+ * arrive in visible clumps rather than flowing, which reads as a slow model
+ * even though throughput is identical. At 50ms a 100 tok/s stream arrived as 40
+ * updates instead of 200 and felt sluggish; at 16ms a realistic 30–60 tok/s
+ * stream is barely batched at all, which is the right outcome — the batching is
+ * there to spare us pathological event counts, not to pace the UI.
+ */
+const BATCH_FLUSH_MS = 16
 
 /** Safety cap on a single run's retained event log. */
 const MAX_EVENTS = 20_000
+
+/**
+ * Hard upper bound on a single run.
+ *
+ * Nothing else bounds one. If a provider stops producing without closing the
+ * connection, `consumeAgentStream` waits on an iterator that never yields, the
+ * run stays `running`, and the keepalive dutifully holds the socket open — so
+ * the author watches a spinner indefinitely instead of getting an error they
+ * can act on. Generous enough for a slow model working through a large context,
+ * short enough that a wedged run surfaces on its own.
+ */
+const MAX_RUN_MS = 10 * 60 * 1000
+
+/**
+ * How long an explicitly cancelled run may take to unwind before it is finished
+ * regardless. Pressing Stop must produce an answer quickly, even when the
+ * provider ignores the abort.
+ */
+const CANCEL_GRACE_MS = 5_000
 
 /**
  * How long a subscriber may sit silent before a blank keepalive line is sent.
@@ -85,6 +115,8 @@ export interface Run {
   pending: { type: string; text: string } | null
   pendingTimer: ReturnType<typeof setTimeout> | null
   gcTimer: ReturnType<typeof setTimeout> | null
+  /** Fires if the run exceeds MAX_RUN_MS, so a wedged generation can't spin forever. */
+  watchdogTimer: ReturnType<typeof setTimeout> | null
 }
 
 const runs = new Map<string, Run>()
@@ -193,7 +225,7 @@ export function emitRunEvent(run: Run, event: ServerRunEvent): void {
   } catch (err) {
     logger.error('Failed to emit run event', {
       runId: run.id,
-      error: err instanceof Error ? err.message : String(err),
+      error: describeError(err),
     })
   }
 }
@@ -205,6 +237,11 @@ function finishRun(run: Run, status: RunStatus, error?: string): void {
   if (error) {
     run.error = error
     append(run, { type: 'error', error })
+  }
+
+  if (run.watchdogTimer) {
+    clearTimeout(run.watchdogTimer)
+    run.watchdogTimer = null
   }
 
   run.status = status
@@ -273,10 +310,31 @@ export async function startRun(opts: StartRunOptions): Promise<Run> {
     pending: null,
     pendingTimer: null,
     gcTimer: null,
+    watchdogTimer: null,
   }
   runs.set(run.id, run)
 
   append(run, { type: 'run-start', runId: run.id, kind: run.kind, status: 'running' })
+
+  // Arm the watchdog. Abort first so the provider call unwinds and any partial
+  // work is persisted by the body's own error path, then finish the run
+  // regardless — the body may itself be wedged and never return.
+  run.watchdogTimer = setTimeout(() => {
+    if (run.status !== 'running') return
+    logger.error('Run exceeded its time limit; aborting', {
+      runId: run.id,
+      kind: run.kind,
+      storyId: run.storyId,
+      limitMs: MAX_RUN_MS,
+    })
+    try {
+      run.abortController.abort()
+    } catch {
+      // Nothing useful to do; the finish below is what unblocks the client.
+    }
+    finishRun(run, 'error', `Generation exceeded the ${Math.round(MAX_RUN_MS / 60000)} minute limit and was stopped.`)
+  }, MAX_RUN_MS)
+  ;(run.watchdogTimer as { unref?: () => void }).unref?.()
 
   const emit = (event: ServerRunEvent) => emitRunEvent(run, event)
 
@@ -292,7 +350,7 @@ export async function startRun(opts: StartRunOptions): Promise<Run> {
       finishRun(run, run.abortController.signal.aborted ? 'cancelled' : 'complete')
     },
     (err) => {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = describeError(err)
       if (run.abortController.signal.aborted) {
         logger.info('Run cancelled', { runId: run.id, kind: run.kind, storyId: run.storyId })
         finishRun(run, 'cancelled')
@@ -370,12 +428,36 @@ export function findRunByClientRequestId(storyId: string, clientRequestId: strin
   return null
 }
 
-/** Explicit user cancel — the only thing that aborts a run. */
+/**
+ * Explicit user cancel — the only thing that aborts a run.
+ *
+ * Aborting only *asks* the generation to stop; a provider that ignores its
+ * abort signal, or a body wedged on something that never observes it, would
+ * leave the run `running` and the author staring at a spinner right after
+ * pressing Stop. So the abort is followed by a short grace period, after which
+ * the run is finished regardless. The body may still be unwinding in the
+ * background — its `emit` calls become no-ops, and any persistence it still
+ * does lands as normal — but the author gets an answer immediately.
+ */
 export function cancelRun(runId: string): boolean {
   const run = runs.get(runId)
   if (!run || run.status !== 'running') return false
+
   run.abortController.abort()
   wake(run)
+
+  const grace = setTimeout(() => {
+    if (run.status !== 'running') return
+    logger.warn('Run ignored its abort; finishing as cancelled anyway', {
+      runId: run.id,
+      kind: run.kind,
+      storyId: run.storyId,
+      graceMs: CANCEL_GRACE_MS,
+    })
+    finishRun(run, 'cancelled')
+  }, CANCEL_GRACE_MS)
+  ;(grace as { unref?: () => void }).unref?.()
+
   return true
 }
 

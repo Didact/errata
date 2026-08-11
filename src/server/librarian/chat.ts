@@ -21,6 +21,13 @@ export type { ChatStreamEvent, ChatResult }
 
 const logger = createLogger('librarian-chat')
 
+/**
+ * Budget for the recovery call that rescues a silent turn. Deliberately short:
+ * it runs *after* a turn already went wrong, so it must not be a second way to
+ * hang. Well under the run watchdog.
+ */
+const CLOSING_MESSAGE_TIMEOUT_MS = 45_000
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -314,18 +321,32 @@ async function writeClosingMessage(args: {
       temperature,
     })
 
+    // This is a *recovery* call on a turn that already failed to say anything.
+    // It must not become a second way to hang: bound it well below the run
+    // watchdog so a wedged provider costs seconds here, not minutes.
+    const closingAbort = new AbortController()
+    const onOuterAbort = () => closingAbort.abort()
+    signal.addEventListener('abort', onOuterAbort, { once: true })
+    const closingTimeout = setTimeout(() => closingAbort.abort(), CLOSING_MESSAGE_TIMEOUT_MS)
+    ;(closingTimeout as { unref?: () => void }).unref?.()
+
     const closing = await closer.stream({
       messages: closingMessages,
-      abortSignal: signal,
+      abortSignal: closingAbort.signal,
     })
 
     let text = ''
-    for await (const part of closing.fullStream) {
-      const p = part as { type?: string; text?: string }
-      if (p.type === 'text-delta' && p.text) {
-        text += p.text
-        onEvent({ type: 'text', text: p.text })
+    try {
+      for await (const part of closing.fullStream) {
+        const p = part as { type?: string; text?: string }
+        if (p.type === 'text-delta' && p.text) {
+          text += p.text
+          onEvent({ type: 'text', text: p.text })
+        }
       }
+    } finally {
+      clearTimeout(closingTimeout)
+      signal.removeEventListener('abort', onOuterAbort)
     }
 
     const trimmed = text.trim()

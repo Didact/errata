@@ -12,6 +12,7 @@ import {
   type CharacterChatConversation,
 } from '../character-chat/storage'
 import { createLogger } from '../logging'
+import { describeError } from '../error-message'
 import { startRun, findLiveRun } from '../runs'
 import { runStreamResponse, resolveExistingRun } from '../runs/http'
 import { createTurnTracker } from '../runs/turn-tracker'
@@ -206,7 +207,7 @@ export function characterChatRoutes(dataDir: string) {
               await tracker.flush()
               await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
                 status: signal.aborted ? 'cancelled' : 'error',
-                ...(signal.aborted ? {} : { error: err instanceof Error ? err.message : String(err) }),
+                ...(signal.aborted ? {} : { error: describeError(err) }),
               })
               throw err
             }
@@ -215,7 +216,7 @@ export function characterChatRoutes(dataDir: string) {
 
         return runStreamResponse(run)
       } catch (err) {
-        requestLogger.error('Character chat failed to start', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Character chat failed to start', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }

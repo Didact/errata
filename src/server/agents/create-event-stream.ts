@@ -1,3 +1,4 @@
+import { describeError, toError } from '../error-message'
 import type { AgentStreamEvent, AgentStreamCompletion } from './stream-types'
 
 /**
@@ -43,8 +44,10 @@ export async function consumeAgentStream(
       // from the model choosing to say nothing. Throw so the run ends 'error'
       // with whatever text and tool calls did land.
       case 'error': {
-        const raw = p.error
-        throw raw instanceof Error ? raw : new Error(String(raw))
+        // Not `String(raw)`: providers reject with a JSON payload as often as
+        // with an Error, and stringifying one yields a literal "[object Object]"
+        // that travels all the way to the author's screen.
+        throw toError(p.error)
       }
       // The underlying call was aborted (an explicit cancel). Stop consuming;
       // the run layer derives the final status from the abort signal.
@@ -96,7 +99,7 @@ export async function consumeAgentStream(
           type: 'tool-error',
           id: toolCallId,
           toolName,
-          error: errVal instanceof Error ? errVal.message : String(errVal),
+          error: describeError(errVal),
         }
         break
       }

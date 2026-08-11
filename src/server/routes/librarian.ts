@@ -25,6 +25,7 @@ import {
 } from '../librarian/storage'
 import { applyFragmentSuggestion } from '../librarian/suggestions'
 import { createLogger } from '../logging'
+import { describeError } from '../error-message'
 import { encodeStream } from './encode-stream'
 import { startRun, findLiveRun, type Run } from '../runs'
 import { runStreamResponse, resolveExistingRun } from '../runs/http'
@@ -241,7 +242,7 @@ async function startLibrarianChatRun(args: {
         await tracker.flush()
         await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
           status: signal.aborted ? 'cancelled' : 'error',
-          ...(signal.aborted ? {} : { error: err instanceof Error ? err.message : String(err) }),
+          ...(signal.aborted ? {} : { error: describeError(err) }),
         })
         throw err
       }
@@ -299,7 +300,7 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'Fragment not found' }
       }
       triggerLibrarian(dataDir, params.storyId, fragment).catch((err) => {
-        logger.error('Manual librarian trigger failed', { error: err instanceof Error ? err.message : String(err) })
+        logger.error('Manual librarian trigger failed', { error: describeError(err) })
       })
       return { ok: true, fragmentId }
     }, { detail: { summary: 'Trigger librarian analysis on a specific fragment' } })
@@ -315,7 +316,7 @@ export function librarianRoutes(dataDir: string) {
         const result = await rebuildSummaries(dataDir, params.storyId)
         return { ok: true, ...result }
       } catch (err) {
-        logger.error('Resummarize failed', { error: err instanceof Error ? err.message : String(err) })
+        logger.error('Resummarize failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Failed to rebuild summaries' }
       }
@@ -512,7 +513,7 @@ export function librarianRoutes(dataDir: string) {
         })
         return runStreamResponse(run)
       } catch (err) {
-        requestLogger.error('Refinement failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Refinement failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Refinement failed' }
       }
@@ -578,7 +579,7 @@ export function librarianRoutes(dataDir: string) {
         })
         return runStreamResponse(run)
       } catch (err) {
-        requestLogger.error('Prose transform failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Prose transform failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Prose transform failed' }
       }
@@ -642,7 +643,7 @@ export function librarianRoutes(dataDir: string) {
         })
         return runStreamResponse(run)
       } catch (err) {
-        requestLogger.error('Librarian chat failed to start', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Librarian chat failed to start', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }
@@ -707,7 +708,7 @@ export function librarianRoutes(dataDir: string) {
         })
         return runStreamResponse(run)
       } catch (err) {
-        requestLogger.error('Conversation chat failed to start', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Conversation chat failed to start', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }
