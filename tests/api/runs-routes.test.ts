@@ -535,6 +535,61 @@ describe('run routes', () => {
     expect((await getChatHistory(dataDir, STORY_ID)).messages[1].content).toBe('Partial')
   })
 
+  /**
+   * "Sometimes it's making tool calls, but not always" — the no-tool-call half.
+   * A turn that returns nothing at all must still come back with something.
+   */
+  it('retries a turn that returns nothing at all, with no tool calls', async () => {
+    let call = 0
+    mockAgentStream.mockImplementation(() => {
+      call++
+      if (call === 1) {
+        return Promise.resolve({
+          fullStream: (async function* () {
+            yield { type: 'finish', finishReason: 'stop' }
+          })(),
+          totalUsage: Promise.resolve(undefined),
+        })
+      }
+      return Promise.resolve({
+        fullStream: (async function* () {
+          yield { type: 'text-delta', text: 'Sorry — here is the answer.' }
+          yield { type: 'finish', finishReason: 'stop' }
+        })(),
+        totalUsage: Promise.resolve(undefined),
+      })
+    })
+
+    await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Anything?' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    const turn = (await getChatHistory(dataDir, STORY_ID)).messages[1]
+    expect(turn.content).toBe('Sorry — here is the answer.')
+    expect(turn.status).toBe('complete')
+
+    // The retry must not be able to make edits.
+    const closer = mockAgentCtor.mock.calls.at(-1)![0] as { tools: object; toolChoice: string }
+    expect(Object.keys(closer.tools)).toHaveLength(0)
+    expect(closer.toolChoice).toBe('none')
+  })
+
+  it('records an unrecoverable empty turn as an error, not a blank success', async () => {
+    // Both the turn and the retry say nothing.
+    mockAgentStream.mockImplementation(() => Promise.resolve({
+      fullStream: (async function* () {
+        yield { type: 'finish', finishReason: 'stop' }
+      })(),
+      totalUsage: Promise.resolve(undefined),
+    }))
+
+    await readEvents(await post(`/stories/${STORY_ID}/librarian/chat`, { message: 'Anything?' }))
+    await new Promise(r => setTimeout(r, 100))
+
+    const turn = (await getChatHistory(dataDir, STORY_ID)).messages[1]
+    expect(turn.status).toBe('error')
+    expect(turn.error).toBe('The model returned an empty response.')
+  })
+
   it('404s for an unknown run', async () => {
     expect((await get(`/stories/${STORY_ID}/runs/run-nope`)).status).toBe(404)
     expect((await get(`/stories/${STORY_ID}/runs/run-nope/events?cursor=0`)).status).toBe(404)

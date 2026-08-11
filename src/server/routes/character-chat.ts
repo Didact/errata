@@ -127,7 +127,15 @@ export function characterChatRoutes(dataDir: string) {
           content: text,
           createdAt: new Date().toISOString(),
         })
-        const agentMessages = (afterUser ?? conv).messages.map(m => ({ role: m.role, content: m.content }))
+        // Never replay an empty assistant turn (interrupted, cancelled, or a
+        // model that said nothing) as literal `""` — Anthropic rejects empty
+        // text blocks, which would fail this turn and record another blank one.
+        const agentMessages = (afterUser ?? conv).messages.map(m => ({
+          role: m.role,
+          content: m.content.trim() || (m.role === 'assistant'
+            ? '[No reply was recorded for this turn.]'
+            : '(empty message)'),
+        }))
 
         const run = await startRun({
           dataDir,

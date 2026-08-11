@@ -31,7 +31,7 @@ import { runStreamResponse, resolveExistingRun } from '../runs/http'
 import { startAgentRun } from '../runs/agent-run'
 import { createTurnTracker } from '../runs/turn-tracker'
 import type { Logger } from '../logging'
-import type { ChatHistory, ChatHistoryMessage } from '../librarian/storage'
+import type { ChatHistory, ChatHistoryMessage, ChatHistoryToolCall } from '../librarian/storage'
 import type { ChatContinuation } from '../librarian/chat'
 import type { AgentStreamCompletion } from '../agents/stream-types'
 
@@ -69,6 +69,64 @@ function deriveChatTurnFields(
   }
 }
 
+/** Keep a replayed tool call recognisable without pasting a whole fragment back in. */
+function summarizeToolCall(tc: ChatHistoryToolCall): string {
+  const args = JSON.stringify(tc.args ?? {})
+  return `${tc.toolName}(${args.length > 200 ? args.slice(0, 200) + '…' : args})`
+}
+
+/**
+ * Render stored history into the messages the provider actually sees.
+ *
+ * Two things go wrong with a naive `{ role, content }` map.
+ *
+ * An assistant turn stores its tool calls in a separate field, so replaying
+ * only `content` hides the edits that turn made. The model then has no record
+ * of them and cheerfully does them again — the duplicate-edit complaint, in its
+ * deeper form: persisting the turn isn't enough if the next turn never sees it.
+ *
+ * And an assistant turn can legitimately have empty content — interrupted by a
+ * restart, cancelled, or a model that made its edits and said nothing. Sending
+ * that as literal `""` is worse than useless: Anthropic rejects empty text
+ * blocks outright, which fails the next turn, which records another empty turn.
+ * One blank reply compounds into a conversation that never answers again.
+ */
+export function toProviderMessages(
+  messages: ChatHistoryMessage[],
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = []
+
+  for (const m of messages) {
+    if (m.role === 'user') {
+      // A user turn is only ever what the author typed; never blank in practice,
+      // but guard anyway so we can't emit empty content from this side either.
+      out.push({ role: 'user', content: m.content.trim() || '(empty message)' })
+      continue
+    }
+
+    const parts: string[] = []
+    if (m.content.trim()) parts.push(m.content.trim())
+
+    const applied = (m.toolCalls ?? [])
+      .filter(tc => tc.toolName !== 'planEdits')
+      .map(summarizeToolCall)
+    if (applied.length) {
+      parts.push(`[Already applied this turn: ${applied.join('; ')}]`)
+    }
+
+    if (m.status === 'error' || m.status === 'cancelled') {
+      parts.push(`[This turn ended early (${m.status}) — anything planned beyond the calls above did not happen.]`)
+    }
+
+    out.push({
+      role: 'assistant',
+      content: parts.join('\n\n') || '[No reply was recorded for this turn.]',
+    })
+  }
+
+  return out
+}
+
 /**
  * Start a librarian chat turn as a server-owned run.
  *
@@ -98,7 +156,7 @@ async function startLibrarianChatRun(args: {
     : appendChatMessage(dataDir, storyId, m)
 
   const historyAfterUser = await appendMessage({ role: 'user', content: message })
-  const agentMessages = historyAfterUser.messages.map(m => ({ role: m.role, content: m.content }))
+  const agentMessages = toProviderMessages(historyAfterUser.messages)
 
   return startRun({
     dataDir,
@@ -142,13 +200,33 @@ async function startLibrarianChatRun(args: {
         // An aborted provider stream often ends gracefully rather than
         // throwing, so completing normally is not proof the turn finished —
         // the signal is what says whether the author stopped it.
+        // Nothing said *and* nothing done, even after the tool-free retry:
+        // record a failure rather than a blank success, which reads to the
+        // author as the librarian ignoring them.
+        //
+        // A silent turn that *did* land tool calls is not an error — the work
+        // happened. That one stays 'complete' and the UI notes the missing
+        // prose alongside the tool-call cards.
+        const saidNothing =
+          !result.text.trim() && result.toolCalls.length === 0 && !signal.aborted
+
         await tracker.flush()
         await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
           content: result.text,
           ...(result.reasoning ? { reasoning: result.reasoning } : {}),
           ...deriveChatTurnFields(result, maxSteps),
-          status: signal.aborted ? 'cancelled' : 'complete',
+          status: signal.aborted ? 'cancelled' : saidNothing ? 'error' : 'complete',
+          ...(saidNothing ? { error: 'The model returned an empty response.' } : {}),
         })
+
+        if (saidNothing) {
+          logger.warn('Librarian chat produced no text', {
+            runId,
+            finishReason: result.finishReason,
+            stepCount: result.stepCount,
+            toolCallCount: result.toolCalls.length,
+          })
+        }
 
         logger.info('Librarian chat completed', {
           runId,

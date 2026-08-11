@@ -226,16 +226,15 @@ async function librarianChatInner(
     run: async (onEvent) => {
       const completion = await consumeAgentStream(result.fullStream, onEvent)
 
-      // The tool loop can end *on* a tool call — the model spends its whole
-      // step budget applying edits, or simply never writes a closing message.
-      // The author is then left with a pile of tool-call cards and an empty
-      // reply, with no way to tell whether the work finished. Spend one short,
-      // tool-free call so the turn actually says something.
-      if (
-        !completion.text.trim() &&
-        completion.toolCalls.length > 0 &&
-        !abortController.signal.aborted
-      ) {
+      // A turn that says nothing is always a failure to report back, never a
+      // valid answer. It happens two ways: the tool loop ends *on* a tool call
+      // (the model spends its step budget applying edits and never writes a
+      // closing message), or the model returns nothing at all. Both leave the
+      // author staring at a blank reply. Spend one short, tool-free call so the
+      // turn actually says something — the earlier version of this only covered
+      // the tool-call case, which missed exactly the "not always making tool
+      // calls" half of the report.
+      if (!completion.text.trim() && !abortController.signal.aborted) {
         const recovered = await writeClosingMessage({
           model,
           temperature,
@@ -282,9 +281,28 @@ async function writeClosingMessage(args: {
     .join('\n')
 
   const ranOutOfSteps = completion.stepCount >= maxSteps
-  const closingRequest = ranOutOfSteps
-    ? 'You hit your tool-step limit for this turn. Briefly tell me what you changed and what is still left to do. Do not claim you finished work you did not do.'
-    : 'Briefly tell me what you changed.'
+
+  // Two different silences need two different prompts. After tool calls the
+  // model has work to report; with no tool calls it simply never answered, and
+  // telling it "describe your changes" would invite it to invent some.
+  const closingMessages = applied
+    ? [
+        ...messages,
+        { role: 'assistant' as const, content: `I made these changes:\n${applied}` },
+        {
+          role: 'user' as const,
+          content: ranOutOfSteps
+            ? 'You hit your tool-step limit for this turn. Briefly tell me what you changed and what is still left to do. Do not claim you finished work you did not do.'
+            : 'Briefly tell me what you changed.',
+        },
+      ]
+    : [
+        ...messages,
+        {
+          role: 'user' as const,
+          content: 'Your last response came back empty. Please answer my previous message directly. If you cannot, say plainly why.',
+        },
+      ]
 
   try {
     const closer = new ToolLoopAgent({
@@ -297,11 +315,7 @@ async function writeClosingMessage(args: {
     })
 
     const closing = await closer.stream({
-      messages: [
-        ...messages,
-        { role: 'assistant' as const, content: `I made these changes:\n${applied || '(none)'}` },
-        { role: 'user' as const, content: closingRequest },
-      ],
+      messages: closingMessages,
       abortSignal: signal,
     })
 
