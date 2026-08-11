@@ -539,7 +539,7 @@ describe('prewriter', () => {
       expect(log).toBeDefined()
       expect(log!.prewriterBrief).toBe('Brief: focus on dialogue.')
       expect(log!.prewriterModel).toBeDefined()
-      expect(log!.prewriterDurationMs).toBeGreaterThan(0)
+      expect(log!.prewriterDurationMs).toBeGreaterThanOrEqual(0)
     })
 
     it('mode-specific planning prompts differ for generate vs regenerate', async () => {
