@@ -180,6 +180,39 @@ describe('consumeRun', () => {
     expect((err as InstanceType<typeof ApiError>).data.runId).toBe('run-live')
   })
 
+  /**
+   * The failure behind "spinner forever, but a refresh shows new content": the
+   * connection is dead while the socket still looks open, so the reader never
+   * resolves and nothing triggers a reconnect. The server keepalives every 5s
+   * precisely so this silence is detectable.
+   */
+  it('treats a silent stream as a disconnect and reattaches from the cursor', async () => {
+    // A stream that yields run-start, then never resolves again.
+    const stalling = new ReadableStream<SequencedChatEvent>({
+      start(controller) {
+        controller.enqueue(seq(0, { type: 'run-start', runId: 'run-1', kind: 'generation', status: 'running' }))
+        controller.enqueue(seq(1, { type: 'text', text: 'partial' }))
+        // Never closes, never enqueues again.
+      },
+    })
+
+    const body = [
+      seq(2, { type: 'text', text: ' and the rest' }),
+      seq(3, { type: 'run-end', status: 'complete' }),
+    ].map(e => JSON.stringify(e)).join('\n') + '\n'
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(body, { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const seen: ChatEvent[] = []
+    const result = await runWithTimers(consumeRun('story-1', stalling, e => seen.push(e)))
+
+    expect(result).toEqual({ runId: 'run-1', status: 'complete' })
+    // Resumed at exactly the next unseen seq — nothing lost, nothing repeated.
+    expect(fetchSpy).toHaveBeenCalledWith('/api/stories/story-1/runs/run-1/events?cursor=2')
+    expect(seen.filter(e => e.type === 'text').map(e => (e as { text: string }).text).join(''))
+      .toBe('partial and the rest')
+  })
+
   it('gives up when the stream dies before a run id is known', async () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)

@@ -22,6 +22,46 @@ import { isTerminalChatEvent, type ChatEvent, type RunKind, type RunStatus, type
 
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
+/**
+ * How long the client will wait for *anything* before declaring the stream dead.
+ *
+ * The server sends a keepalive blank line every 5s for exactly this reason, so
+ * silence this long means the connection is gone even though the socket still
+ * looks open — a half-open TCP connection, a proxy that dropped one direction,
+ * a backgrounded tab whose read loop was throttled. Nothing else notices: the
+ * reader simply never resolves, so there is no stream end to trigger a
+ * reconnect, and the author watches a spinner while the run finishes without
+ * them. Three missed keepalives is unambiguous.
+ */
+const STALL_TIMEOUT_MS = 15_000
+
+class StreamStalled extends Error {
+  constructor() {
+    super('Stream stalled')
+    this.name = 'StreamStalled'
+  }
+}
+
+/**
+ * `reader.read()` that rejects rather than hanging forever if the stream goes
+ * quiet past {@link STALL_TIMEOUT_MS}.
+ */
+async function readWithStallTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+): Promise<ReadableStreamReadResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StreamStalled()), STALL_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export type RunPhase = 'idle' | RunStatus
 
 export interface UseRunStreamOptions {
@@ -141,7 +181,7 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
 
     try {
       while (true) {
-        const { done, value } = await reader.read()
+        const { done, value } = await readWithStallTimeout(reader)
         if (done) break
         if (epoch !== epochRef.current) break
 
@@ -172,6 +212,15 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
             settle(event.status, event.status === 'error' ? 'Generation failed' : undefined)
           }
         }
+      }
+    } catch (err) {
+      // A stall is a dropped connection, not a failed run — fall through with
+      // `terminal` false so the caller reconnects from the cursor. Anything
+      // else (a genuinely errored stream) is treated the same way: the run is
+      // authoritative, and reattaching will tell us how it really ended.
+      if (!(err instanceof StreamStalled)) {
+        // Keep unexpected failures visible in dev without breaking recovery.
+        console.warn('[useRunStream] stream read failed; will reattach', err)
       }
     } finally {
       connectedRef.current = false

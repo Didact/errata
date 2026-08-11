@@ -3,6 +3,37 @@ import { isTerminalChatEvent, type ChatEvent, type RunStatus, type RunSummary, t
 
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
+/**
+ * How long to wait for anything before treating the stream as dead. The server
+ * keepalives every 5s, so silence this long means the connection is gone even
+ * though the socket still looks open — and a reader that never resolves would
+ * otherwise hang here forever with no stream end to trigger a reconnect.
+ */
+const STALL_TIMEOUT_MS = 15_000
+
+class StreamStalled extends Error {
+  constructor() {
+    super('Stream stalled')
+    this.name = 'StreamStalled'
+  }
+}
+
+async function readWithStallTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+): Promise<ReadableStreamReadResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StreamStalled()), STALL_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export interface ConsumeRunResult {
   runId: string | null
   status: RunStatus
@@ -36,7 +67,7 @@ export async function consumeRun(
     const reader = stream.getReader()
     try {
       while (true) {
-        const { done, value } = await reader.read()
+        const { done, value } = await readWithStallTimeout(reader)
         if (done) return false
 
         const event = value
@@ -55,6 +86,9 @@ export async function consumeRun(
           return true
         }
       }
+    } catch {
+      // Stalled or errored mid-stream: not a result, so the caller reconnects.
+      return false
     } finally {
       reader.cancel().catch(() => {})
     }
