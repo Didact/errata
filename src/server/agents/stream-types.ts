@@ -15,9 +15,22 @@ export interface AgentStreamCompletion {
   finishReason: string
 }
 
+/**
+ * A prepared but not-yet-started agent generation.
+ *
+ * Streaming agents return this instead of a live ReadableStream so that the
+ * caller — the run registry — decides when the generation runs and where its
+ * events go. Nothing about an HTTP request's lifetime can reach the generation:
+ * disconnecting a client just means nobody is reading the run's event log.
+ */
 export interface AgentStreamResult {
-  eventStream: ReadableStream<string>
-  completion: Promise<AgentStreamCompletion>
+  /**
+   * Drive the generation to completion, pushing events to `onEvent`.
+   * Call exactly once. `onEvent` must not throw.
+   */
+  run(onEvent: (event: AgentStreamEvent) => void): Promise<AgentStreamCompletion>
+  /** Abort the underlying LLM call. Explicit user cancel only. */
+  cancel(): void
 }
 
 // Backwards-compat aliases

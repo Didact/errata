@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
-import { ChevronDown, ChevronRight, Brain, Loader2, Wrench } from 'lucide-react'
+import { ChevronDown, ChevronRight, Brain, Loader2, Wrench, AlertTriangle } from 'lucide-react'
 import { StreamMarkdown } from '@/components/ui/stream-markdown'
 
 export interface ToolCallInfo {
@@ -17,6 +17,12 @@ export interface AssistantMessage {
   reasoning?: string
   toolCalls?: ToolCallInfo[]
   error?: string
+  /** Steps the model declared via `planEdits` at the start of the turn. */
+  plan?: string[]
+  /** Tool calls it actually got through. */
+  completedSteps?: string[]
+  /** It ran out of tool steps with work still outstanding. */
+  incomplete?: boolean
 }
 
 export type ChatMessage =
@@ -116,7 +122,61 @@ export function ReasoningSection({ reasoning, streaming }: { reasoning: string; 
   )
 }
 
+/**
+ * Shown when a turn ran out of tool steps with work outstanding.
+ *
+ * Without this the author sees a pile of tool-call cards and no explanation of
+ * whether the request actually finished — the edits look complete when they
+ * aren't.
+ */
+export function IncompleteTurnNotice({ msg }: { msg: AssistantMessage }) {
+  const [expanded, setExpanded] = useState(false)
+  const remaining = (msg.plan?.length ?? 0) - (msg.completedSteps?.length ?? 0)
+
+  return (
+    <div className="mt-1.5 rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-[0.625rem]">
+      <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+        <AlertTriangle className="size-3 shrink-0" />
+        <span>
+          Ran out of tool steps
+          {remaining > 0 ? ` — ${remaining} planned step${remaining === 1 ? '' : 's'} not done` : ' before finishing'}.
+        </span>
+      </div>
+      <p className="mt-1 pl-[1.125rem] text-muted-foreground">
+        Ask the librarian to continue, or raise Max Steps in story settings.
+      </p>
+      {msg.plan && msg.plan.length > 0 && (
+        <>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="mt-1 flex items-center gap-1 pl-[1.125rem] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            Its plan
+          </button>
+          {expanded && (
+            <ul className="mt-1 pl-[2rem] space-y-0.5">
+              {msg.plan.map((step, i) => {
+                const done = i < (msg.completedSteps?.length ?? 0)
+                return (
+                  <li key={i} className={done ? 'text-muted-foreground line-through' : 'text-foreground/80'}>
+                    {done ? '✓ ' : '○ '}{step}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 export function AssistantMessageView({ msg, streaming }: { msg: AssistantMessage; streaming: boolean }) {
+  // A finished turn with tool calls but nothing said is a failure to report
+  // back, not a valid empty answer — never render it as a blank bubble.
+  const silentAfterWork = !streaming && !msg.content && !msg.error && (msg.toolCalls?.length ?? 0) > 0
+
   return (
     <div className="break-words">
       {msg.reasoning && (
@@ -135,9 +195,15 @@ export function AssistantMessageView({ msg, streaming }: { msg: AssistantMessage
           streaming={streaming}
         />
       )}
+      {silentAfterWork && !msg.incomplete && (
+        <div className="text-[0.625rem] text-muted-foreground italic">
+          Made the changes above without a written reply.
+        </div>
+      )}
       {streaming && !msg.content && !msg.reasoning && (
         <span className="inline-block w-0.5 h-[1em] bg-primary/60 animate-pulse align-text-bottom" />
       )}
+      {!streaming && msg.incomplete && <IncompleteTurnNotice msg={msg} />}
       {!streaming && msg.error && (
         <div className="mt-1.5 text-[0.625rem] text-destructive italic">
           {msg.error}

@@ -497,6 +497,51 @@ describe('generation endpoint', () => {
     expect(res.status).toBe(422)
   })
 
+  /**
+   * The "prose cutting out" symptom: the tab is backgrounded partway through,
+   * the connection drops, and the passage used to be saved truncated (the
+   * stream's `cancel` aborted the LLM call). The generation must now run to
+   * completion and save the whole thing.
+   */
+  it('finishes and saves the full passage after the client disconnects', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+
+    // Behave like a real provider: reject the iterator once the signal aborts.
+    // Without this the mock can't distinguish "abort wired to disconnect" from
+    // "abort wired to explicit cancel only".
+    mockAgentStream.mockImplementation((args: { abortSignal?: AbortSignal }) => Promise.resolve({
+      fullStream: (async function* () {
+        yield { type: 'text-delta' as const, text: 'The first half. ' }
+        await gate
+        if (args?.abortSignal?.aborted) throw new Error('aborted')
+        yield { type: 'text-delta' as const, text: 'The second half.' }
+        yield { type: 'finish' as const, finishReason: 'stop' }
+      })(),
+      totalUsage: Promise.resolve({ inputTokens: 10, outputTokens: 20 }),
+    }))
+
+    const res = await api(`/stories/${storyId}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'Continue', saveResult: true }),
+    })
+    expect(res.status).toBe(200)
+
+    // Read a little, then hang up.
+    const reader = res.body!.getReader()
+    await reader.read()
+    await reader.cancel()
+
+    release()
+    await new Promise((r) => setTimeout(r, 200))
+
+    const fragments = await listFragments(dataDir, storyId, 'prose')
+    const generated = fragments.find(f => f.meta?.generatedFrom === 'Continue')
+    expect(generated).toBeDefined()
+    expect(generated!.content).toBe('The first half. The second half.')
+  })
+
   // --- Regenerate mode ---
 
   it('regenerate mode replaces fragment content and stores previousContent', async () => {

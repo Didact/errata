@@ -6,7 +6,8 @@ Character Chat lets you talk to a character as if they were in-world, constraine
 
 - Conversations are stored per-story on disk and can be listed, resumed, or deleted.
 - Storage is branch-aware, so each timeline has its own character-chat history.
-- Chat responses stream as NDJSON events (`text`, `reasoning`, `tool-call`, `tool-result`, `finish`).
+- Chat runs as a server-owned **run** (see `docs/streaming-runs.md`): the client sends only the new message, the server owns the transcript, and a disconnect never stops or loses a turn.
+- Chat responses stream as NDJSON events (`run-start`, `text`, `reasoning`, `tool-call`, `tool-result`, `finish`, `run-end`), each carrying a `seq` cursor.
 - The chat agent uses read-only fragment tools so it can look things up without mutating story data.
 - Model routing supports character-chat-specific provider/model settings with fallback to namespace and story defaults.
 - The UI is conversation-first: you can start a new chat, resume older chats, switch persona modes, and set a story-point cutoff.
@@ -93,24 +94,36 @@ Routes are defined in `src/server/routes/character-chat.ts`.
 
 ### Chat payload
 
+Only the new message is sent — the server holds the transcript and appends to it.
+`clientRequestId` is an optional idempotency key so a retry over a flaky link
+attaches to the run already in flight instead of generating twice.
+
 ```json
 {
-  "messages": [
-    { "role": "user", "content": "What happened in the archive fire?" }
-  ]
+  "message": "What happened in the archive fire?",
+  "clientRequestId": "cr-abc123"
 }
 ```
+
+A turn already running for this conversation returns `409` with the live `runId`,
+so the client attaches rather than racing.
 
 ### Streaming format (NDJSON)
 
 Example events from `/chat` stream:
 
 ```json
-{"type":"text","text":"I remember smoke before I saw flames..."}
-{"type":"tool-call","id":"...","toolName":"getFragment","args":{"id":"pr-ab12"}}
-{"type":"tool-result","id":"...","toolName":"getFragment","result":{"ok":true}}
-{"type":"finish","finishReason":"stop","stepCount":2}
+{"type":"run-start","runId":"run-abc","kind":"character-chat","status":"running","seq":0}
+{"type":"text","text":"I remember smoke before I saw flames...","seq":1}
+{"type":"tool-call","id":"...","toolName":"getFragment","args":{"id":"pr-ab12"},"seq":2}
+{"type":"tool-result","id":"...","toolName":"getFragment","result":{"ok":true},"seq":3}
+{"type":"finish","finishReason":"stop","stepCount":2,"seq":4}
+{"type":"run-end","status":"complete","seq":5}
 ```
+
+`run-end` (and `error`) are terminal. A stream that ends *without* one was a
+dropped connection, not a result — reattach with
+`GET /stories/:storyId/runs/:runId/events?cursor=N`.
 
 ## Provider/Model Selection
 
@@ -139,7 +152,7 @@ The Character Chat view is mounted from the story route. The composer auto-resiz
 
 Character chat uses the **agent block system** for context assembly. Instead of hardcoded system prompts and manual context string building, the character chat agent registers block definitions in `src/server/character-chat/blocks.ts`. At runtime, `compileAgentContext()` assembles the system and user messages from those blocks, applying any per-story agent block config overrides.
 
-The agent is created via the shared `createToolAgent()` wrapper, and the response stream is built by `createEventStream()` — both from `src/server/agents/`.
+The agent is created via the shared `createToolAgent()` wrapper. The agent returns an `AgentStreamResult` (`{ run(onEvent), cancel() }`); the run registry drives it and owns the event log, so no consumer can stop the generation.
 
 Character portraits are shown in the chat UI when the character fragment has an image reference in its `refs` array.
 
@@ -150,7 +163,8 @@ Character portraits are shown in the chat UI when the character fragment has an 
 - `src/server/character-chat/storage.ts`
 - `src/server/character-chat/agents.ts`
 - `src/server/agents/create-agent.ts` — shared `createToolAgent` wrapper
-- `src/server/agents/create-event-stream.ts` — shared NDJSON stream builder
+- `src/server/agents/create-event-stream.ts` — `consumeAgentStream`, the shared agent-event normalizer
+- `src/server/runs/` — run registry, turn tracker, and HTTP glue
 - `src/server/agents/compile-agent-context.ts` — block-based context compiler
 - `tests/character-chat/chat.test.ts`
 - `tests/character-chat/storage.test.ts`

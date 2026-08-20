@@ -287,7 +287,7 @@ describe('character chat endpoints', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello' }],
+            message: 'Hello',
           }),
         }),
       )
@@ -329,7 +329,7 @@ describe('character chat endpoints', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Where should I go?' }],
+            message: 'Where should I go?',
           }),
         }),
       )
@@ -350,15 +350,18 @@ describe('character chat endpoints', () => {
 
       mockEmptyResponse()
 
-      await app.fetch(
+      // Drain the stream: the generation is a detached run, so the response
+      // returns before the run body has built the agent.
+      const res = await app.fetch(
         new Request(`http://localhost/api/stories/${story.id}/character-chat/conversations/${conv.id}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello' }],
+            message: 'Hello',
           }),
         }),
       )
+      await res.text()
 
       expect(mockAgentCtor).toHaveBeenCalled()
       const config = mockAgentCtor.mock.calls[0][0]
@@ -381,15 +384,18 @@ describe('character chat endpoints', () => {
 
       mockEmptyResponse()
 
-      await app.fetch(
+      // Drain the stream: the generation is a detached run, so the response
+      // returns before the run body has built the agent.
+      const res = await app.fetch(
         new Request(`http://localhost/api/stories/${story.id}/character-chat/conversations/${conv.id}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello' }],
+            message: 'Hello',
           }),
         }),
       )
+      await res.text()
 
       expect(mockAgentCtor).toHaveBeenCalled()
       const config = mockAgentCtor.mock.calls[0][0]
@@ -406,7 +412,7 @@ describe('character chat endpoints', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello' }],
+            message: 'Hello',
           }),
         }),
       )
@@ -425,7 +431,7 @@ describe('character chat endpoints', () => {
         new Request(`http://localhost/api/stories/${story.id}/character-chat/conversations/${conv.id}/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: [] }),
+          body: JSON.stringify({ message: '   ' }),
         }),
       )
       expect(res.status).toBe(422)
@@ -446,7 +452,7 @@ describe('character chat endpoints', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Hello Kael' }],
+            message: 'Hello Kael',
           }),
         }),
       )

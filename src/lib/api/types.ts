@@ -235,15 +235,22 @@ export interface LibrarianAcceptSuggestionResponse {
   createdFragmentId: string | null
 }
 
+/** Lifecycle of a persisted assistant turn. See `server/librarian/storage.ts`. */
+export type ChatTurnStatus = 'streaming' | 'complete' | 'error' | 'cancelled'
+
 export interface ChatHistory {
   messages: Array<{
     role: 'user' | 'assistant'
     content: string
     reasoning?: string
-    toolCalls?: Array<{ toolName: string; args: Record<string, unknown>; result?: unknown }>
+    toolCalls?: Array<{ toolName: string; args: Record<string, unknown>; result?: unknown; error?: string }>
     plan?: string[]
     completedSteps?: string[]
     incomplete?: boolean
+    /** The run that produced (or is producing) this turn. */
+    runId?: string
+    status?: ChatTurnStatus
+    error?: string
   }>
   updatedAt: string
 }
@@ -458,6 +465,30 @@ export interface Clarification {
   answer: string
 }
 
+// --- Server-authoritative runs ---
+
+export type RunKind =
+  | 'librarian.chat'
+  | 'generation'
+  | 'character-chat'
+  | 'librarian.refine'
+  | 'librarian.prose-transform'
+
+export type RunStatus = 'running' | 'complete' | 'error' | 'cancelled'
+
+export interface RunSummary {
+  id: string
+  storyId: string
+  kind: RunKind
+  scopeId: string | null
+  status: RunStatus
+  startedAt: string
+  finishedAt?: string
+  error?: string
+  /** Total events emitted so far — also the cursor a fresh reader would end at. */
+  seq: number
+}
+
 export type ChatEvent =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
@@ -467,9 +498,33 @@ export type ChatEvent =
   | { type: 'tool-result'; id: string; toolName: string; result: unknown }
   | { type: 'tool-error'; id: string; toolName: string; error: string }
   | { type: 'phase'; phase: string }
-  | { type: 'finish'; finishReason: string; stepCount: number }
+  | { type: 'finish'; finishReason: string; stepCount: number; stopped?: boolean }
   | { type: 'prewriter-directions'; directions: SuggestionDirection[] }
   | { type: 'clarify-questions'; questions: ClarifyQuestion[]; round: number }
+  // Run framing. `run-end` and `error` are terminal: a stream that ends
+  // *without* one of them was a dropped connection, not a result — which is
+  // how the client tells "the generation failed" from "my phone slept".
+  | { type: 'run-start'; runId: string; kind: RunKind; status: RunStatus }
+  | { type: 'run-end'; status: RunStatus }
+  | { type: 'error'; error: string }
+  // Surfaced from the server's blank-line padding. Carries no content and no
+  // `seq`; it exists so a reader can tell "the connection is alive but the
+  // model is thinking" from "the connection is dead". Never dispatched to
+  // callers — a generation is routinely quiet for far longer than the stall
+  // timeout, so without this a slow model would look like a dropped link.
+  | { type: 'keepalive' }
+
+/** Every event delivered over the wire carries its position in the run's log. */
+export type SequencedChatEvent = ChatEvent & { seq: number }
+
+/** The events that mean "this run is over", as opposed to a dropped connection. */
+export type TerminalChatEvent =
+  | Extract<ChatEvent, { type: 'run-end' }>
+  | Extract<ChatEvent, { type: 'error' }>
+
+export function isTerminalChatEvent(event: ChatEvent): event is TerminalChatEvent {
+  return event.type === 'run-end' || event.type === 'error'
+}
 
 // Character Chat types
 export type PersonaMode =
@@ -482,6 +537,10 @@ export interface CharacterChatMessage {
   content: string
   reasoning?: string
   createdAt: string
+  /** The run that produced (or is producing) this assistant turn. */
+  runId?: string
+  status?: ChatTurnStatus
+  error?: string
 }
 
 export interface CharacterChatConversation {

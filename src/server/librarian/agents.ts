@@ -43,6 +43,16 @@ const ChatInputSchema = z.object({
     content: z.string(),
   })),
   maxSteps: z.int().positive().optional(),
+  /**
+   * Resumes an assistant turn that hit the step limit mid-plan. Must be
+   * declared here: `inputSchema.parse` strips unknown keys, so an undeclared
+   * field never reaches the agent.
+   */
+  continuation: z.object({
+    plan: z.array(z.string()),
+    completedSteps: z.array(z.string()),
+    reasoning: z.string(),
+  }).optional(),
 })
 
 const OptimizeCharacterInputSchema = z.object({

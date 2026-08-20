@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { consumeRun } from '@/lib/api/runs'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Sparkles, Square, X } from 'lucide-react'
@@ -44,20 +45,20 @@ export function RefinementPanel({
         instructions.trim() || undefined,
       )
 
-      const reader = stream.getReader()
       let accumulated = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
+      const result = await consumeRun(storyId, stream, (event) => {
+        if (event.type === 'text') {
+          accumulated += event.text
           setStreamedText(accumulated)
         }
-
         if (outputRef.current) {
           outputRef.current.scrollTop = outputRef.current.scrollHeight
         }
+      })
+
+      if (result.status === 'error') {
+        setError(result.error ?? 'Refinement failed')
+        return
       }
 
       // Invalidate fragment queries to show updated content

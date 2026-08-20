@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { consumeRun } from '@/lib/api/runs'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 
@@ -40,15 +41,17 @@ export function ProseActionInput({
         ? await api.generation.regenerate(storyId, fragmentId, input)
         : await api.generation.refine(storyId, fragmentId, input)
 
-      const reader = stream.getReader()
       let accumulated = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value.type === 'text') {
-          accumulated += value.text
+      const result = await consumeRun(storyId, stream, (event) => {
+        if (event.type === 'text') {
+          accumulated += event.text
           onStream(accumulated)
         }
+      })
+
+      if (result.status === 'error') {
+        setError(result.error ?? 'Operation failed')
+        return
       }
 
       await queryClient.invalidateQueries({ queryKey: ['fragments', storyId] })

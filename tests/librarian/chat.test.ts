@@ -73,6 +73,51 @@ async function* createMockFullStream(events: Array<{ type: string; [key: string]
   }
 }
 
+/** Read an NDJSON response to completion. */
+async function readEvents(res: Response): Promise<Array<Record<string, unknown>>> {
+  if (!res.body) return []
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const events: Array<Record<string, unknown>> = []
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      if (line.trim()) events.push(JSON.parse(line))
+    }
+  }
+  if (buffer.trim()) events.push(JSON.parse(buffer))
+  return events
+}
+
+/**
+ * POST a chat message and drain the response, like a real client.
+ *
+ * Draining matters now that the generation is a detached run: the response
+ * returns as soon as the run is registered, so anything that inspects the
+ * agent mocks has to wait for the run body to actually get there.
+ */
+async function postChat(
+  app: ReturnType<typeof createApp>,
+  storyId: string,
+  body: Record<string, unknown>,
+  path = 'librarian/chat',
+): Promise<{ res: Response; events: Array<Record<string, unknown>> }> {
+  const res = await app.fetch(
+    new Request(`http://localhost/api/stories/${storyId}/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+  return { res, events: res.ok ? await readEvents(res) : [] }
+}
+
 describe('librarian chat endpoint', () => {
   let dataDir: string
   let cleanup: () => Promise<void>
@@ -115,44 +160,22 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    const res = await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: 'Hello',
-        }),
-      }),
-    )
+    const { res, events } = await postChat(app, story.id, { message: 'Hello' })
 
     expect(res.status).toBe(200)
-    const contentType = res.headers.get('content-type')
-    expect(contentType === 'text/event-stream' || contentType === 'application/x-ndjson; charset=utf-8').toBe(true)
+    expect(res.headers.get('content-type')).toBe('application/x-ndjson; charset=utf-8')
+    // The run id is on the response so a client can reattach without having to
+    // parse the body first.
+    expect(res.headers.get('x-run-id')).toBeTruthy()
 
-    // Read the NDJSON stream
-    const reader = res.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    const events: Array<Record<string, unknown>> = []
+    // The stream is framed by the run: run-start … run-end.
+    expect(events[0]).toMatchObject({ type: 'run-start', seq: 0 })
+    expect(events.at(-1)).toMatchObject({ type: 'run-end', status: 'complete' })
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) {
-        if (line.trim()) {
-          events.push(JSON.parse(line))
-        }
-      }
-    }
-
-    // Should have text events and a finish event
+    // Consecutive text deltas are coalesced into one event; the text is intact.
     const textEvents = events.filter((e) => e.type === 'text')
     expect(textEvents.length).toBeGreaterThan(0)
-    expect(textEvents[0].text).toBe('Hello')
-    expect(textEvents[1].text).toBe(' world')
+    expect(textEvents.map(e => e.text).join('')).toBe('Hello world')
 
     const finishEvent = events.find((e) => e.type === 'finish')
     expect(finishEvent).toBeDefined()
@@ -191,35 +214,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    const res = await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: 'Edit the prose',
-        }),
-      }),
-    )
+    const { res, events } = await postChat(app, story.id, { message: 'Edit the prose' })
 
     expect(res.status).toBe(200)
-
-    const reader = res.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    const events: Array<Record<string, unknown>> = []
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) {
-        if (line.trim()) {
-          events.push(JSON.parse(line))
-        }
-      }
-    }
 
     const toolCallEvent = events.find((e) => e.type === 'tool-call')
     expect(toolCallEvent).toBeDefined()
@@ -247,33 +244,7 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    const res = await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: 'Why is the sky blue?',
-        }),
-      }),
-    )
-
-    const reader = res.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    const events: Array<Record<string, unknown>> = []
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) {
-        if (line.trim()) {
-          events.push(JSON.parse(line))
-        }
-      }
-    }
+    const { events } = await postChat(app, story.id, { message: 'Why is the sky blue?' })
 
     const reasoningEvent = events.find((e) => e.type === 'reasoning')
     expect(reasoningEvent).toBeDefined()
@@ -297,15 +268,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'List characters',
-        }),
-      }),
-    )
+        })
 
     // Verify ToolLoopAgent was created with tools
     expect(mockAgentCtor).toHaveBeenCalled()
@@ -327,15 +292,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'Reanalyze the prose',
-        }),
-      }),
-    )
+        })
 
     expect(mockAgentCtor).toHaveBeenCalled()
     const config = mockAgentCtor.mock.calls[0][0]
@@ -361,15 +320,9 @@ describe('librarian chat endpoint', () => {
     await appendChatMessage(dataDir, story.id, { role: 'user', content: 'Hello' })
     await appendChatMessage(dataDir, story.id, { role: 'assistant', content: 'Hi there!' })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'How are you?',
-        }),
-      }),
-    )
+        })
 
     expect(mockAgentStream).toHaveBeenCalled()
     const callArgs = mockAgentStream.mock.calls[0][0]
@@ -395,15 +348,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'Hello',
-        }),
-      }),
-    )
+        })
 
     expect(mockAgentCtor).toHaveBeenCalled()
     const config = mockAgentCtor.mock.calls[0][0]
@@ -428,15 +375,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'Hello',
-        }),
-      }),
-    )
+        })
 
     expect(mockAgentStream).toHaveBeenCalled()
     const callArgs = mockAgentStream.mock.calls[0][0]
@@ -459,16 +400,10 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'Hello',
           maxSteps: 3,
-        }),
-      }),
-    )
+        })
 
     expect(mockAgentCtor).toHaveBeenCalled()
     const config = mockAgentCtor.mock.calls[0][0]
@@ -491,15 +426,9 @@ describe('librarian chat endpoint', () => {
       steps: Promise.resolve([]),
     })
 
-    await app.fetch(
-      new Request(`http://localhost/api/stories/${story.id}/librarian/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    await postChat(app, story.id, {
           message: 'Hello librarian',
-        }),
-      }),
-    )
+        })
 
     // Wait for async persistence
     await new Promise((r) => setTimeout(r, 100))

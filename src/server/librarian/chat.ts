@@ -1,4 +1,4 @@
-import { tool, ToolLoopAgent, stepCountIs } from 'ai'
+import { tool, ToolLoopAgent, stepCountIs, type LanguageModel } from 'ai'
 import { z } from 'zod/v4'
 import { getModel } from '../llm/client'
 import { getFragment, getStory } from '../fragments/storage'
@@ -6,8 +6,8 @@ import { buildContextState } from '../llm/context-builder'
 import { createFragmentTools } from '../llm/tools'
 import { pluginRegistry } from '../plugins/registry'
 import { collectPluginTools } from '../plugins/tools'
-import { createLogger } from '../logging'
-import { createEventStream } from '../agents/create-event-stream'
+import { createLogger, type Logger } from '../logging'
+import { consumeAgentStream } from '../agents/create-event-stream'
 import { compileAgentContext } from '../agents/compile-agent-context'
 import { createAgentInstance } from '../agents/agent-instance'
 import { getFragmentsByTag } from '../fragments/associations'
@@ -20,6 +20,13 @@ import type { AgentBlockContext } from '../agents/agent-block-context'
 export type { ChatStreamEvent, ChatResult }
 
 const logger = createLogger('librarian-chat')
+
+/**
+ * Budget for the recovery call that rescues a silent turn. Deliberately short:
+ * it runs *after* a turn already went wrong, so it must not be a second way to
+ * hang. Well under the run watchdog.
+ */
+const CLOSING_MESSAGE_TIMEOUT_MS = 45_000
 
 export interface ChatMessage {
   role: 'user' | 'assistant'
@@ -120,7 +127,9 @@ async function librarianChatInner(
       const agent = createAgentInstance('librarian.optimize-character', { dataDir, storyId })
       try {
         const result = await agent.execute({ fragmentId, instructions })
-        await result.completion
+        // Nested agent: drive it to completion, discarding its events — the
+        // chat turn reports the outcome, not the sub-agent's token stream.
+        await result.run(() => {})
         return { ok: true, fragmentId }
       } catch (err) {
         agent.fail(err)
@@ -211,10 +220,147 @@ async function librarianChatInner(
     })),
   ]
 
-  // Stream with write tools
+  // Prepare the stream. The abort signal is wired to explicit cancel only — a
+  // client disconnecting must never stop a turn that is already applying edits.
+  const abortController = new AbortController()
   const result = await chatAgent.stream({
     messages: aiMessages,
+    abortSignal: abortController.signal,
   })
 
-  return createEventStream(result.fullStream)
+  return {
+    cancel: () => abortController.abort(),
+    run: async (onEvent) => {
+      const completion = await consumeAgentStream(result.fullStream, onEvent)
+
+      // A turn that says nothing is always a failure to report back, never a
+      // valid answer. It happens two ways: the tool loop ends *on* a tool call
+      // (the model spends its step budget applying edits and never writes a
+      // closing message), or the model returns nothing at all. Both leave the
+      // author staring at a blank reply. Spend one short, tool-free call so the
+      // turn actually says something — the earlier version of this only covered
+      // the tool-call case, which missed exactly the "not always making tool
+      // calls" half of the report.
+      if (!completion.text.trim() && !abortController.signal.aborted) {
+        const recovered = await writeClosingMessage({
+          model,
+          temperature,
+          instructions: systemMessage?.content,
+          messages: aiMessages,
+          completion,
+          maxSteps: opts.maxSteps ?? 10,
+          signal: abortController.signal,
+          onEvent,
+          logger: requestLogger,
+        })
+        if (recovered) return { ...completion, text: recovered }
+      }
+
+      return completion
+    },
+  }
+}
+
+/**
+ * Ask the model to report what it just did, with no tools available.
+ *
+ * Only used to rescue a turn that ended silently after tool calls. Tools are
+ * withheld and the step budget is 1, so this can't apply further edits — it can
+ * only describe the ones already applied. Returns null if it produces nothing,
+ * leaving the caller's empty result untouched.
+ */
+async function writeClosingMessage(args: {
+  model: LanguageModel
+  temperature: number | undefined
+  instructions: string | undefined
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>
+  completion: { toolCalls: Array<{ toolName: string; args: Record<string, unknown> }>; stepCount: number }
+  maxSteps: number
+  signal: AbortSignal
+  onEvent: (event: ChatStreamEvent) => void
+  logger: Logger
+}): Promise<string | null> {
+  const { model, temperature, instructions, messages, completion, maxSteps, signal, onEvent } = args
+
+  const applied = completion.toolCalls
+    .filter(tc => tc.toolName !== 'planEdits')
+    .map(tc => `- ${tc.toolName}(${JSON.stringify(tc.args).slice(0, 300)})`)
+    .join('\n')
+
+  const ranOutOfSteps = completion.stepCount >= maxSteps
+
+  // Two different silences need two different prompts. After tool calls the
+  // model has work to report; with no tool calls it simply never answered, and
+  // telling it "describe your changes" would invite it to invent some.
+  const closingMessages = applied
+    ? [
+        ...messages,
+        { role: 'assistant' as const, content: `I made these changes:\n${applied}` },
+        {
+          role: 'user' as const,
+          content: ranOutOfSteps
+            ? 'You hit your tool-step limit for this turn. Briefly tell me what you changed and what is still left to do. Do not claim you finished work you did not do.'
+            : 'Briefly tell me what you changed.',
+        },
+      ]
+    : [
+        ...messages,
+        {
+          role: 'user' as const,
+          content: 'Your last response came back empty. Please answer my previous message directly. If you cannot, say plainly why.',
+        },
+      ]
+
+  try {
+    const closer = new ToolLoopAgent({
+      model,
+      instructions: instructions || 'You are a helpful assistant.',
+      tools: {},
+      toolChoice: 'none',
+      stopWhen: stepCountIs(1),
+      temperature,
+    })
+
+    // This is a *recovery* call on a turn that already failed to say anything.
+    // It must not become a second way to hang: bound it well below the run
+    // watchdog so a wedged provider costs seconds here, not minutes.
+    const closingAbort = new AbortController()
+    const onOuterAbort = () => closingAbort.abort()
+    signal.addEventListener('abort', onOuterAbort, { once: true })
+    const closingTimeout = setTimeout(() => closingAbort.abort(), CLOSING_MESSAGE_TIMEOUT_MS)
+    ;(closingTimeout as { unref?: () => void }).unref?.()
+
+    const closing = await closer.stream({
+      messages: closingMessages,
+      abortSignal: closingAbort.signal,
+    })
+
+    let text = ''
+    try {
+      for await (const part of closing.fullStream) {
+        const p = part as { type?: string; text?: string }
+        if (p.type === 'text-delta' && p.text) {
+          text += p.text
+          onEvent({ type: 'text', text: p.text })
+        }
+      }
+    } finally {
+      clearTimeout(closingTimeout)
+      signal.removeEventListener('abort', onOuterAbort)
+    }
+
+    const trimmed = text.trim()
+    if (!trimmed) return null
+    args.logger.info('Recovered an empty librarian turn with a closing message', {
+      toolCallCount: completion.toolCalls.length,
+      ranOutOfSteps,
+    })
+    return text
+  } catch (err) {
+    // Best-effort: a failed rescue must not fail the turn whose edits landed.
+    args.logger.warn('Could not write a closing message for an empty turn', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
 }

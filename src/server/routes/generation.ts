@@ -39,6 +39,8 @@ import { registerActiveAgent, unregisterActiveAgent } from '../agents/active-reg
 import { reportUsage } from '../llm/token-tracker'
 import { normalizeTokenUsage } from '../llm/usage-normalizer'
 import { createLogger } from '../logging'
+import { startRun, abortedByUser } from '../runs'
+import { runStreamResponse } from '../runs/http'
 import type { Fragment } from '../fragments/schema'
 import type { SuggestDirectionsResult } from '../directions/suggest'
 
@@ -238,7 +240,6 @@ export function generationRoutes(dataDir: string) {
       const modelMessages = addCacheBreakpoints(messages)
 
       requestLogger.info('Starting LLM stream...')
-      const abortController = new AbortController()
 
       // Build tool description lines for reuse (same logic as context-builder createDefaultBlocks)
       const toolLinesList: string[] = []
@@ -265,18 +266,29 @@ export function generationRoutes(dataDir: string) {
       let lastFinishReason = 'unknown'
       let stepCount = 0
       let wasAborted = false
-      // Set when the stream throws for a reason other than client abort, so the
-      // save path knows not to persist a fragment from a failed generation.
+      // Set when the stream throws for a reason other than an explicit stop, so
+      // the save path knows not to persist a fragment from a failed generation.
       let streamFailed = false
+      // Held so the run is marked errored only after the save block has run.
+      let deferredError: unknown
 
       const genActivityId = registerActiveAgent(params.storyId, 'generation.writer')
 
-      const eventStream = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          const encoder = new TextEncoder()
-          const emit = (event: Record<string, unknown>) => {
-            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
-          }
+      const run = await startRun({
+        dataDir,
+        storyId: params.storyId,
+        kind: 'generation',
+        scopeId: body.fragmentId ?? null,
+        ...(body.clientRequestId ? { clientRequestId: body.clientRequestId } : {}),
+        // The generation runs detached from this request. Backgrounding the tab
+        // or losing signal no longer truncates the prose — only an explicit
+        // Stop (which aborts `signal`) does.
+        body: async ({ runId, emit: emitEvent, signal }) => {
+          const abortController = new AbortController()
+          // Forward the reason so the save path can tell an author Stop (keep the
+          // partial prose) from a watchdog timeout (a failure).
+          signal.addEventListener('abort', () => abortController.abort(signal.reason), { once: true })
+          const emit = (event: Record<string, unknown>) => emitEvent(event as never)
           let totalUsagePromise: PromiseLike<unknown> | undefined
           try {
             // Run prewriter inside the stream so events are streamed live
@@ -336,7 +348,6 @@ export function generationRoutes(dataDir: string) {
                   // skips the writer and the save block entirely.
                   emit({ type: 'clarify-questions', questions: prewriterResult.questions, round: clarifyRound })
                   emit({ type: 'finish', finishReason: 'clarify', stepCount: prewriterResult.stepCount, stopped: true })
-                  controller.close()
                   return
                 }
                 prewriterBrief = prewriterResult.brief
@@ -451,39 +462,27 @@ export function generationRoutes(dataDir: string) {
               }
 
               if (event) {
-                controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+                emit(event)
               }
             }
 
             // Emit a final finish event
-            controller.enqueue(encoder.encode(JSON.stringify({
-              type: 'finish',
-              finishReason: lastFinishReason,
-              stepCount,
-            }) + '\n'))
-            controller.close()
+            emit({ type: 'finish', finishReason: lastFinishReason, stepCount })
           } catch (err) {
-            wasAborted = abortController.signal.aborted
+            wasAborted = abortedByUser(abortController.signal)
             if (wasAborted) {
-              requestLogger.info('Generation aborted by client', { textLength: fullText.length })
+              // Explicit Stop only — a disconnected client can no longer reach
+              // this path, so partial prose is saved because the author asked
+              // to stop, not because their phone locked.
+              requestLogger.info('Generation stopped by author', { textLength: fullText.length })
               lastFinishReason = 'stop'
-              try {
-                controller.enqueue(encoder.encode(JSON.stringify({
-                  type: 'finish',
-                  finishReason: 'stop',
-                  stepCount,
-                  stopped: true,
-                }) + '\n'))
-                controller.close()
-              } catch {
-                // Controller may already be closed
-              }
+              emit({ type: 'finish', finishReason: 'stop', stepCount, stopped: true })
             } else {
-              // Non-abort failure (provider/network/parse error). The client's
-              // stream is errored; do NOT persist a fragment from a failed run.
+              // Non-abort failure (provider/network/parse error). Mark the run
+              // errored and do NOT persist a fragment from a failed generation.
               streamFailed = true
               requestLogger.error('Generation stream failed', { error: err instanceof Error ? err.message : String(err), textLength: fullText.length })
-              controller.error(err)
+              deferredError = err
             }
           } finally {
             unregisterActiveAgent(genActivityId)
@@ -655,27 +654,28 @@ export function generationRoutes(dataDir: string) {
                 ...(prewriterBrief ? { prewriterBrief } : {}),
                 ...(prewriterReasoning ? { prewriterReasoning } : {}),
                 ...(prewriterLogMessages ? { prewriterMessages: prewriterLogMessages } : {}),
-                ...(prewriterDurationMs ? { prewriterDurationMs } : {}),
+                // Nullish, not truthy: a sub-millisecond prewriter phase is a
+                // real measurement, not a missing one.
+                ...(prewriterDurationMs != null ? { prewriterDurationMs } : {}),
                 ...(prewriterModel ? { prewriterModel } : {}),
                 ...(prewriterUsage ? { prewriterUsage } : {}),
                 ...(prewriterDirections?.length ? { prewriterDirections } : {}),
               }
-              await saveGenerationLog(dataDir, params.storyId, log)
-              requestLogger.info('Generation log saved', { logId, stepCount, finishReason, stepsExceeded })
+              await saveGenerationLog(dataDir, params.storyId, { ...log, runId })
+              requestLogger.info('Generation log saved', { logId, runId, stepCount, finishReason, stepsExceeded })
             } catch (err) {
               requestLogger.error('Error saving generation result', { error: err instanceof Error ? err.message : String(err) })
             }
           }
-        },
-        cancel() {
-          abortController.abort()
+
+          // Surface a provider failure only after the save block has decided
+          // not to persist, so the run ends 'error' with the log intact.
+          if (deferredError) throw deferredError
         },
       })
 
-      requestLogger.info('Streaming NDJSON response', { saveResult: body.saveResult ?? false })
-      return new Response(eventStream, {
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      })
+      requestLogger.info('Generation run started', { runId: run.id, saveResult: body.saveResult ?? false })
+      return runStreamResponse(run)
     }, {
       body: t.Object({
         input: t.String(),
@@ -684,7 +684,8 @@ export function generationRoutes(dataDir: string) {
         fragmentId: t.Optional(t.String()),
         clarifications: t.Optional(t.Array(t.Object({ question: t.String(), answer: t.String() }))),
         clarifyRound: t.Optional(t.Number()),
+        clientRequestId: t.Optional(t.String()),
       }),
-      detail: { summary: 'Generate prose via streaming NDJSON' },
+      detail: { summary: 'Generate prose (starts a run; streaming NDJSON)' },
     })
 }

@@ -4,7 +4,7 @@ import { ensureCoreAgentsRegistered } from './register-core'
 import { recordAgentRun } from './traces'
 import { registerActiveAgent, unregisterActiveAgent } from './active-registry'
 import type { AgentInvocationContext, AgentTraceEntry } from './types'
-import type { AgentStreamResult, AgentStreamCompletion } from './stream-types'
+import type { AgentStreamResult, AgentStreamCompletion, AgentStreamEvent } from './stream-types'
 
 /**
  * Maps agent name literals to their parsed input types.
@@ -138,20 +138,21 @@ export function createAgentInstance<K extends string>(
       }
 
       const rawOutput = await definition.run(invocationContext, parsedInput)
-      const { eventStream, completion } = rawOutput as AgentStreamResult
+      const streamResult = rawOutput as AgentStreamResult
 
-      const wrappedCompletion = completion.then(
-        (result) => {
-          finish('success', result)
-          return result
+      return {
+        cancel: () => streamResult.cancel(),
+        run: async (onEvent: (event: AgentStreamEvent) => void) => {
+          try {
+            const result = await streamResult.run(onEvent)
+            finish('success', result)
+            return result
+          } catch (err) {
+            finish('error', err)
+            throw err
+          }
         },
-        (err) => {
-          finish('error', err)
-          throw err
-        },
-      )
-
-      return { eventStream, completion: wrappedCompletion }
+      }
     },
 
     fail(error: unknown): void {

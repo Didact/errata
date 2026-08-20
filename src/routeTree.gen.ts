@@ -9,29 +9,29 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as OpenrouterOauthCallbackRouteImport } from './routes/openrouter-oauth-callback'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as StoryStoryIdRouteImport } from './routes/story.$storyId'
+import { Route as OpenrouterOauthCallbackRouteImport } from './routes/openrouter-oauth-callback'
 import { Route as ApiSplatRouteImport } from './routes/api.$'
+import { Route as StoryStoryIdRouteImport } from './routes/story.$storyId'
 
-const OpenrouterOauthCallbackRoute = OpenrouterOauthCallbackRouteImport.update({
-  id: '/openrouter-oauth-callback',
-  path: '/openrouter-oauth-callback',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const StoryStoryIdRoute = StoryStoryIdRouteImport.update({
-  id: '/story/$storyId',
-  path: '/story/$storyId',
+const OpenrouterOauthCallbackRoute = OpenrouterOauthCallbackRouteImport.update({
+  id: '/openrouter-oauth-callback',
+  path: '/openrouter-oauth-callback',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiSplatRoute = ApiSplatRouteImport.update({
   id: '/api/$',
   path: '/api/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StoryStoryIdRoute = StoryStoryIdRouteImport.update({
+  id: '/story/$storyId',
+  path: '/story/$storyId',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -76,13 +76,6 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/openrouter-oauth-callback': {
-      id: '/openrouter-oauth-callback'
-      path: '/openrouter-oauth-callback'
-      fullPath: '/openrouter-oauth-callback'
-      preLoaderRoute: typeof OpenrouterOauthCallbackRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -90,11 +83,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/story/$storyId': {
-      id: '/story/$storyId'
-      path: '/story/$storyId'
-      fullPath: '/story/$storyId'
-      preLoaderRoute: typeof StoryStoryIdRouteImport
+    '/openrouter-oauth-callback': {
+      id: '/openrouter-oauth-callback'
+      path: '/openrouter-oauth-callback'
+      fullPath: '/openrouter-oauth-callback'
+      preLoaderRoute: typeof OpenrouterOauthCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/$': {
@@ -102,6 +95,13 @@ declare module '@tanstack/react-router' {
       path: '/api/$'
       fullPath: '/api/$'
       preLoaderRoute: typeof ApiSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/story/$storyId': {
+      id: '/story/$storyId'
+      path: '/story/$storyId'
+      fullPath: '/story/$storyId'
+      preLoaderRoute: typeof StoryStoryIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }

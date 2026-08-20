@@ -41,13 +41,18 @@ export const characterChat = {
       { method: 'DELETE' },
     ),
 
+  /**
+   * Send one new message. The server owns the transcript, so the client no
+   * longer replays the whole conversation on every turn.
+   */
   chat: (
     storyId: string,
     conversationId: string,
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+    message: string,
+    clientRequestId?: string,
   ) =>
     fetchEventStream(
       `/stories/${storyId}/character-chat/conversations/${conversationId}/chat`,
-      { messages },
+      { message, ...(clientRequestId ? { clientRequestId } : {}) },
     ),
 }

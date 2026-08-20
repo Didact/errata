@@ -22,6 +22,8 @@
   - How to publish `@tealios/errata-plugin-sdk` manually and via GitHub Actions.
 - `docs/instruction-registry.md`
   - Instruction registry: centralized prompt management, model-specific instruction overrides, InstructionSet schema, and registered keys.
+- `docs/streaming-runs.md`
+  - Server-authoritative runs: why generations outlive their HTTP request, the run registry, the NDJSON event protocol and cursor/reconnect contract, chat turn persistence, idempotency, and how to add a new streaming surface.
 - `docs/generation-pipeline.md`
   - Generation pipeline: standard and prewriter modes, context assembly, streaming events, generation logs, and mode-specific behavior.
 - `docs/adding-agents.md`

@@ -14,6 +14,7 @@ import {
   saveAnalysis as saveLibrarianAnalysis,
   getChatHistory as getLibrarianChatHistory,
   appendChatMessage,
+  updateChatMessageByRunId,
   clearChatHistory as clearLibrarianChatHistory,
   listConversations,
   createConversation,
@@ -24,8 +25,14 @@ import {
 } from '../librarian/storage'
 import { applyFragmentSuggestion } from '../librarian/suggestions'
 import { createLogger } from '../logging'
+import { describeError } from '../error-message'
 import { encodeStream } from './encode-stream'
-import type { ChatHistory, ChatHistoryMessage } from '../librarian/storage'
+import { startRun, findLiveRun, abortedByTimeout, abortedByUser, type Run } from '../runs'
+import { runStreamResponse, resolveExistingRun } from '../runs/http'
+import { startAgentRun } from '../runs/agent-run'
+import { createTurnTracker } from '../runs/turn-tracker'
+import type { Logger } from '../logging'
+import type { ChatHistory, ChatHistoryMessage, ChatHistoryToolCall } from '../librarian/storage'
 import type { ChatContinuation } from '../librarian/chat'
 import type { AgentStreamCompletion } from '../agents/stream-types'
 
@@ -50,7 +57,10 @@ function deriveChatTurnFields(
   const completedSteps = result.toolCalls
     .filter(tc => tc.toolName !== 'planEdits')
     .map(tc => `${tc.toolName}(${JSON.stringify(tc.args)})`)
-  const incomplete = Boolean(plan?.length) && result.stepCount >= maxSteps
+  // Running out of steps mid-work leaves the request unfinished whether or not
+  // the model declared a plan first — keying this on `plan` alone meant an
+  // exhausted turn with no `planEdits` call was silently recorded as a success.
+  const incomplete = result.stepCount >= maxSteps && result.toolCalls.length > 0
 
   return {
     toolCalls: result.toolCalls,
@@ -58,6 +68,191 @@ function deriveChatTurnFields(
     ...(completedSteps.length > 0 ? { completedSteps } : {}),
     ...(incomplete ? { incomplete: true } : {}),
   }
+}
+
+/** Keep a replayed tool call recognisable without pasting a whole fragment back in. */
+function summarizeToolCall(tc: ChatHistoryToolCall): string {
+  const args = JSON.stringify(tc.args ?? {})
+  return `${tc.toolName}(${args.length > 200 ? args.slice(0, 200) + '…' : args})`
+}
+
+/**
+ * Render stored history into the messages the provider actually sees.
+ *
+ * Two things go wrong with a naive `{ role, content }` map.
+ *
+ * An assistant turn stores its tool calls in a separate field, so replaying
+ * only `content` hides the edits that turn made. The model then has no record
+ * of them and cheerfully does them again — the duplicate-edit complaint, in its
+ * deeper form: persisting the turn isn't enough if the next turn never sees it.
+ *
+ * And an assistant turn can legitimately have empty content — interrupted by a
+ * restart, cancelled, or a model that made its edits and said nothing. Sending
+ * that as literal `""` is worse than useless: Anthropic rejects empty text
+ * blocks outright, which fails the next turn, which records another empty turn.
+ * One blank reply compounds into a conversation that never answers again.
+ */
+export function toProviderMessages(
+  messages: ChatHistoryMessage[],
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = []
+
+  for (const m of messages) {
+    if (m.role === 'user') {
+      // A user turn is only ever what the author typed; never blank in practice,
+      // but guard anyway so we can't emit empty content from this side either.
+      out.push({ role: 'user', content: m.content.trim() || '(empty message)' })
+      continue
+    }
+
+    const parts: string[] = []
+    if (m.content.trim()) parts.push(m.content.trim())
+
+    const applied = (m.toolCalls ?? [])
+      .filter(tc => tc.toolName !== 'planEdits')
+      .map(summarizeToolCall)
+    if (applied.length) {
+      parts.push(`[Already applied this turn: ${applied.join('; ')}]`)
+    }
+
+    if (m.status === 'error' || m.status === 'cancelled') {
+      parts.push(`[This turn ended early (${m.status}) — anything planned beyond the calls above did not happen.]`)
+    }
+
+    out.push({
+      role: 'assistant',
+      content: parts.join('\n\n') || '[No reply was recorded for this turn.]',
+    })
+  }
+
+  return out
+}
+
+/**
+ * Start a librarian chat turn as a server-owned run.
+ *
+ * Shared by the legacy per-story chat and named conversations — they differ
+ * only by `conversationId`. The turn is persisted before, during, and after
+ * generation, so a client that disconnects loses nothing: the run keeps
+ * applying edits and recording them, and the client reattaches by run id.
+ */
+async function startLibrarianChatRun(args: {
+  dataDir: string
+  storyId: string
+  conversationId: string | null
+  message: string
+  clientRequestId?: string
+  maxSteps: number
+  logger: Logger
+}): Promise<Run> {
+  const { dataDir, storyId, conversationId, message, clientRequestId, maxSteps, logger } = args
+
+  const priorHistory = conversationId
+    ? await getConversationHistory(dataDir, storyId, conversationId)
+    : await getLibrarianChatHistory(dataDir, storyId)
+  const continuation = buildContinuation(priorHistory)
+
+  const appendMessage = (m: ChatHistoryMessage) => conversationId
+    ? appendConversationMessage(dataDir, storyId, conversationId, m)
+    : appendChatMessage(dataDir, storyId, m)
+
+  const historyAfterUser = await appendMessage({ role: 'user', content: message })
+  const agentMessages = toProviderMessages(historyAfterUser.messages)
+
+  return startRun({
+    dataDir,
+    storyId,
+    kind: 'librarian.chat',
+    scopeId: conversationId,
+    ...(clientRequestId ? { clientRequestId } : {}),
+    body: async ({ runId, emit, signal }) => {
+      // Record the turn as in-flight *before* generating, so it exists in
+      // history from the first moment and is never derived from a live stream.
+      await appendMessage({ role: 'assistant', content: '', runId, status: 'streaming' })
+
+      const tracker = createTurnTracker({
+        write: (snap) => updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
+          content: snap.content,
+          ...(snap.reasoning ? { reasoning: snap.reasoning } : {}),
+          ...(snap.toolCalls.length ? { toolCalls: snap.toolCalls } : {}),
+        }),
+      })
+
+      const agent = createAgentInstance('librarian.chat', { dataDir, storyId })
+      let streamResult: Awaited<ReturnType<typeof agent.execute>>
+      try {
+        streamResult = await agent.execute({ messages: agentMessages, maxSteps, continuation })
+      } catch (err) {
+        agent.fail(err)
+        throw err
+      }
+
+      signal.addEventListener('abort', () => streamResult.cancel(), { once: true })
+
+      try {
+        const result = await streamResult.run((event) => {
+          emit(event)
+          tracker.onEvent(event)
+        })
+
+        // Settle history before the run is marked finished, so a client that
+        // sees `run-end` and refetches always reads the final turn.
+        //
+        // An aborted provider stream often ends gracefully rather than
+        // throwing, so completing normally is not proof the turn finished —
+        // the signal is what says whether the author stopped it.
+        // Nothing said *and* nothing done, even after the tool-free retry:
+        // record a failure rather than a blank success, which reads to the
+        // author as the librarian ignoring them.
+        //
+        // A silent turn that *did* land tool calls is not an error — the work
+        // happened. That one stays 'complete' and the UI notes the missing
+        // prose alongside the tool-call cards.
+        const saidNothing =
+          !result.text.trim() && result.toolCalls.length === 0 && !signal.aborted
+
+        await tracker.flush()
+        await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
+          content: result.text,
+          ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+          ...deriveChatTurnFields(result, maxSteps),
+          status: abortedByTimeout(signal)
+            ? 'error'
+            : signal.aborted ? 'cancelled' : saidNothing ? 'error' : 'complete',
+          ...(abortedByTimeout(signal) ? { error: 'Generation timed out.' } : {}),
+          ...(saidNothing ? { error: 'The model returned an empty response.' } : {}),
+        })
+
+        if (saidNothing) {
+          logger.warn('Librarian chat produced no text', {
+            runId,
+            finishReason: result.finishReason,
+            stepCount: result.stepCount,
+            toolCallCount: result.toolCalls.length,
+          })
+        }
+
+        logger.info('Librarian chat completed', {
+          runId,
+          stepCount: result.stepCount,
+          finishReason: result.finishReason,
+          toolCallCount: result.toolCalls.length,
+        })
+      } catch (err) {
+        // Keep whatever streamed through — those tool calls already ran and
+        // already mutated fragments. Dropping them is what made the librarian
+        // re-apply the same edits on the next turn.
+        await tracker.flush()
+        await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
+          status: abortedByUser(signal) ? 'cancelled' : 'error',
+          ...(abortedByUser(signal)
+            ? {}
+            : { error: abortedByTimeout(signal) ? 'Generation timed out.' : describeError(err) }),
+        })
+        throw err
+      }
+    },
+  })
 }
 
 export function librarianRoutes(dataDir: string) {
@@ -110,7 +305,7 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'Fragment not found' }
       }
       triggerLibrarian(dataDir, params.storyId, fragment).catch((err) => {
-        logger.error('Manual librarian trigger failed', { error: err instanceof Error ? err.message : String(err) })
+        logger.error('Manual librarian trigger failed', { error: describeError(err) })
       })
       return { ok: true, fragmentId }
     }, { detail: { summary: 'Trigger librarian analysis on a specific fragment' } })
@@ -126,7 +321,7 @@ export function librarianRoutes(dataDir: string) {
         const result = await rebuildSummaries(dataDir, params.storyId)
         return { ok: true, ...result }
       } catch (err) {
-        logger.error('Resummarize failed', { error: err instanceof Error ? err.message : String(err) })
+        logger.error('Resummarize failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Failed to rebuild summaries' }
       }
@@ -300,34 +495,30 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'Cannot refine prose fragments. Use the generation refine mode instead.' }
       }
 
-      let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
-        agent = createAgentInstance('librarian.refine', { dataDir, storyId: params.storyId })
-        const { eventStream, completion } = await agent.execute({
-          fragmentId: body.fragmentId,
-          instructions: body.instructions,
-          maxSteps: story.settings.maxSteps ?? 5,
-        })
-
-        completion.then((result) => {
-          requestLogger.info('Refinement completed', {
+        const run = await startAgentRun({
+          dataDir,
+          storyId: params.storyId,
+          kind: 'librarian.refine',
+          scopeId: body.fragmentId,
+          agentName: 'librarian.refine',
+          input: {
             fragmentId: body.fragmentId,
-            stepCount: result.stepCount,
-            finishReason: result.finishReason,
-            toolCallCount: result.toolCalls.length,
-          })
-        }).catch((err) => {
-          requestLogger.error('Refinement completion error', { error: err instanceof Error ? err.message : String(err) })
+            instructions: body.instructions,
+            maxSteps: story.settings.maxSteps ?? 5,
+          },
+          onComplete: (result) => {
+            requestLogger.info('Refinement completed', {
+              fragmentId: body.fragmentId,
+              stepCount: result.stepCount,
+              finishReason: result.finishReason,
+              toolCallCount: result.toolCalls.length,
+            })
+          },
         })
-
-        return new Response(encodeStream(eventStream), {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        })
+        return runStreamResponse(run)
       } catch (err) {
-        // Runner threw before producing a stream — record the failure and free
-        // the active-agent registration instead of leaking it.
-        agent?.fail(err)
-        requestLogger.error('Refinement failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Refinement failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Refinement failed' }
       }
@@ -336,7 +527,7 @@ export function librarianRoutes(dataDir: string) {
         fragmentId: t.String(),
         instructions: t.Optional(t.String()),
       }),
-      detail: { summary: 'Refine a non-prose fragment (streaming NDJSON)' },
+      detail: { summary: 'Refine a non-prose fragment (starts a run; streaming NDJSON)' },
     })
 
     // --- Librarian Prose Transform ---
@@ -364,40 +555,36 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'Only prose fragments support selection transforms.' }
       }
 
-      let agent: ReturnType<typeof createAgentInstance> | undefined
       try {
-        agent = createAgentInstance('librarian.prose-transform', { dataDir, storyId: params.storyId })
-        const { eventStream, completion } = await agent.execute({
-          fragmentId: body.fragmentId,
-          selectedText: body.selectedText,
-          operation: body.operation,
-          instruction: body.instruction,
-          sourceContent: body.sourceContent,
-          contextBefore: body.contextBefore,
-          contextAfter: body.contextAfter,
-        })
-
-        completion.then((result) => {
-          requestLogger.info('Prose transform completed', {
+        const run = await startAgentRun({
+          dataDir,
+          storyId: params.storyId,
+          kind: 'librarian.prose-transform',
+          scopeId: body.fragmentId,
+          agentName: 'librarian.prose-transform',
+          input: {
             fragmentId: body.fragmentId,
+            selectedText: body.selectedText,
             operation: body.operation,
-            stepCount: result.stepCount,
-            finishReason: result.finishReason,
-            outputLength: result.text.trim().length,
-            reasoningLength: result.reasoning.trim().length,
-          })
-        }).catch((err) => {
-          requestLogger.error('Prose transform completion error', {
-            error: err instanceof Error ? err.message : String(err),
-          })
+            instruction: body.instruction,
+            sourceContent: body.sourceContent,
+            contextBefore: body.contextBefore,
+            contextAfter: body.contextAfter,
+          },
+          onComplete: (result) => {
+            requestLogger.info('Prose transform completed', {
+              fragmentId: body.fragmentId,
+              operation: body.operation,
+              stepCount: result.stepCount,
+              finishReason: result.finishReason,
+              outputLength: result.text.trim().length,
+              reasoningLength: result.reasoning.trim().length,
+            })
+          },
         })
-
-        return new Response(encodeStream(eventStream), {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        })
+        return runStreamResponse(run)
       } catch (err) {
-        agent?.fail(err)
-        requestLogger.error('Prose transform failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Prose transform failed', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Prose transform failed' }
       }
@@ -440,55 +627,37 @@ export function librarianRoutes(dataDir: string) {
         return { error: 'message is required' }
       }
 
-      let agent: ReturnType<typeof createAgentInstance> | undefined
+      const existing = resolveExistingRun(params.storyId, null, body.clientRequestId)
+      if (existing) return existing
+
+      const live = findLiveRun(params.storyId, 'librarian.chat', null)
+      if (live) {
+        set.status = 409
+        return { error: 'A chat turn is already running', runId: live.id }
+      }
+
       try {
-        const maxSteps = story.settings.maxSteps ?? 10
-        const priorHistory = await getLibrarianChatHistory(dataDir, params.storyId)
-        const continuation = buildContinuation(priorHistory)
-
-        const userMsg: ChatHistoryMessage = { role: 'user', content: text }
-        const historyAfterUser = await appendChatMessage(dataDir, params.storyId, userMsg)
-        const agentMessages = historyAfterUser.messages.map(m => ({ role: m.role, content: m.content }))
-
-        agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
-        const { eventStream, completion } = await agent.execute({
-          messages: agentMessages,
-          maxSteps,
-          continuation,
+        const run = await startLibrarianChatRun({
+          dataDir,
+          storyId: params.storyId,
+          conversationId: null,
+          message: text,
+          ...(body.clientRequestId ? { clientRequestId: body.clientRequestId } : {}),
+          maxSteps: story.settings.maxSteps ?? 10,
+          logger: requestLogger,
         })
-
-        // Persist chat history after completion (in background)
-        completion.then(async (result) => {
-          requestLogger.info('Librarian chat completed', {
-            stepCount: result.stepCount,
-            finishReason: result.finishReason,
-            toolCallCount: result.toolCalls.length,
-          })
-          const assistantMsg: ChatHistoryMessage = {
-            role: 'assistant',
-            content: result.text,
-            ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-            ...deriveChatTurnFields(result, maxSteps),
-          }
-          await appendChatMessage(dataDir, params.storyId, assistantMsg)
-        }).catch((err) => {
-          requestLogger.error('Librarian chat completion error', { error: err instanceof Error ? err.message : String(err) })
-        })
-
-        return new Response(encodeStream(eventStream), {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        })
+        return runStreamResponse(run)
       } catch (err) {
-        agent?.fail(err)
-        requestLogger.error('Librarian chat failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Librarian chat failed to start', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }
     }, {
       body: t.Object({
         message: t.String({ minLength: 1 }),
+        clientRequestId: t.Optional(t.String()),
       }),
-      detail: { summary: 'Chat with the librarian (streaming NDJSON)' },
+      detail: { summary: 'Chat with the librarian (starts a run; streaming NDJSON)' },
     })
 
     // --- Conversations ---
@@ -523,53 +692,36 @@ export function librarianRoutes(dataDir: string) {
       const text = body.message.trim()
       if (!text) { set.status = 422; return { error: 'message is required' } }
 
-      let agent: ReturnType<typeof createAgentInstance> | undefined
+      const existing = resolveExistingRun(params.storyId, params.conversationId, body.clientRequestId)
+      if (existing) return existing
+
+      const live = findLiveRun(params.storyId, 'librarian.chat', params.conversationId)
+      if (live) {
+        set.status = 409
+        return { error: 'A chat turn is already running', runId: live.id }
+      }
+
       try {
-        const maxSteps = story.settings.maxSteps ?? 10
-        const priorHistory = await getConversationHistory(dataDir, params.storyId, params.conversationId)
-        const continuation = buildContinuation(priorHistory)
-
-        const userMsg: ChatHistoryMessage = { role: 'user', content: text }
-        const historyAfterUser = await appendConversationMessage(dataDir, params.storyId, params.conversationId, userMsg)
-        const agentMessages = historyAfterUser.messages.map(m => ({ role: m.role, content: m.content }))
-
-        agent = createAgentInstance('librarian.chat', { dataDir, storyId: params.storyId })
-        const { eventStream, completion } = await agent.execute({
-          messages: agentMessages,
-          maxSteps,
-          continuation,
+        const run = await startLibrarianChatRun({
+          dataDir,
+          storyId: params.storyId,
+          conversationId: params.conversationId,
+          message: text,
+          ...(body.clientRequestId ? { clientRequestId: body.clientRequestId } : {}),
+          maxSteps: story.settings.maxSteps ?? 10,
+          logger: requestLogger,
         })
-
-        completion.then(async (result) => {
-          requestLogger.info('Conversation chat completed', {
-            stepCount: result.stepCount,
-            finishReason: result.finishReason,
-            toolCallCount: result.toolCalls.length,
-          })
-          const assistantMsg: ChatHistoryMessage = {
-            role: 'assistant',
-            content: result.text,
-            ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-            ...deriveChatTurnFields(result, maxSteps),
-          }
-          await appendConversationMessage(dataDir, params.storyId, params.conversationId, assistantMsg)
-        }).catch((err) => {
-          requestLogger.error('Conversation chat completion error', { error: err instanceof Error ? err.message : String(err) })
-        })
-
-        return new Response(encodeStream(eventStream), {
-          headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-        })
+        return runStreamResponse(run)
       } catch (err) {
-        agent?.fail(err)
-        requestLogger.error('Conversation chat failed', { error: err instanceof Error ? err.message : String(err) })
+        requestLogger.error('Conversation chat failed to start', { error: describeError(err) })
         set.status = 500
         return { error: err instanceof Error ? err.message : 'Chat failed' }
       }
     }, {
       body: t.Object({
         message: t.String({ minLength: 1 }),
+        clientRequestId: t.Optional(t.String()),
       }),
-      detail: { summary: 'Chat in a conversation (streaming NDJSON)' },
+      detail: { summary: 'Chat in a conversation (starts a run; streaming NDJSON)' },
     })
 }

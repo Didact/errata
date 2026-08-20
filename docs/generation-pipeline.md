@@ -124,19 +124,38 @@ The writer gets back any unused prewriter steps. For example, if `maxSteps` is 1
 
 ## Streaming Events
 
-The generation endpoint streams NDJSON (one JSON object per line). Event types:
+Generation executes as a server-owned **run** — see `docs/streaming-runs.md`.
+The generation itself is detached from the HTTP request, so disconnecting (a
+backgrounded phone tab, a dropped connection) no longer truncates the passage;
+the run finishes and saves the whole thing. Only an explicit
+`POST /stories/:storyId/runs/:runId/cancel` stops it, and that still saves
+whatever prose was produced, because the author asked to stop.
+
+The endpoint streams NDJSON (one JSON object per line). Every event carries a
+`seq`, its position in the run's event log. Event types:
 
 | Event type | Fields | Description |
 |---|---|---|
+| `run-start` | `runId`, `kind`, `status` | Always first; carries the run id |
 | `phase` | `phase: 'prewriting' \| 'writing'` | Phase transition (prewriter mode only) |
 | `prewriter-text` | `text: string` | Prewriter text delta (prewriter mode only) |
 | `text` | `text: string` | Writer text delta |
 | `reasoning` | `text: string` | Model reasoning/thinking delta |
 | `tool-call` | `id`, `toolName`, `args` | Tool invocation |
 | `tool-result` | `id`, `toolName`, `result` | Tool execution result |
-| `finish` | `finishReason`, `stepCount`, `stopped?` | Stream complete |
+| `finish` | `finishReason`, `stepCount`, `stopped?` | Generation complete |
+| `error` | `error: string` | **Terminal.** The run failed |
+| `run-end` | `status` | **Terminal.** Final run status |
 
-In prewriter mode, events flow in order: `phase:prewriting` → prewriter events (`prewriter-text`, `reasoning`, `tool-call`, `tool-result`) → `phase:writing` → writer events (`text`, `reasoning`, `tool-call`, `tool-result`) → `finish`.
+In prewriter mode, events flow in order: `run-start` → `phase:prewriting` → prewriter events (`prewriter-text`, `reasoning`, `tool-call`, `tool-result`) → `phase:writing` → writer events (`text`, `reasoning`, `tool-call`, `tool-result`) → `finish` → `run-end`.
+
+Consecutive text deltas are coalesced into one event (~50ms) before being
+sequenced, so `seq` values are stable and fewer, larger writes go over the wire.
+
+A stream that ends *without* a terminal `run-end` or `error` was a dropped
+connection, not a result. Reattach with
+`GET /stories/:storyId/runs/:runId/events?cursor=N` to replay what was missed
+and then follow live.
 
 ## Generation Logs
 
@@ -147,6 +166,7 @@ Each generation persists a `GenerationLog` to `data/stories/<storyId>/generation
 | Field | Type | Description |
 |---|---|---|
 | `id` | `string` | Unique log ID (e.g. `gen-m2abc`) |
+| `runId` | `string?` | The run that produced this generation |
 | `createdAt` | `string` | ISO timestamp |
 | `input` | `string` | Author's input text |
 | `messages` | `Array<{role, content}>` | The compiled context messages sent to the writer |

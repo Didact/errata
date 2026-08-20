@@ -314,12 +314,11 @@ export const transformProseSelection = createStreamingRunner<ProseTransformOptio
     contextAfter: opts.contextAfter,
   }),
 
-  afterStream: (result) => {
-    result.completion.then((c) => {
-      transformLogger.info('Prose transform completed', {
-        stepCount: c.stepCount, finishReason: c.finishReason,
-      })
-    }).catch(() => {})
+  // Called once the generation has finished, with its result.
+  afterStream: (c) => {
+    transformLogger.info('Prose transform completed', {
+      stepCount: c.stepCount, finishReason: c.finishReason,
+    })
   },
 })
 ```
@@ -344,7 +343,7 @@ import { getStory, getFragment } from '../fragments/storage'
 import { buildContextState } from '../llm/context-builder'
 import { createFragmentTools } from '../llm/tools'
 import { createToolAgent } from '../agents/create-agent'
-import { createEventStream } from '../agents/create-event-stream'
+import { consumeAgentStream } from '../agents/create-event-stream'
 import { compileAgentContext } from '../agents/compile-agent-context'
 import { withBranch } from '../fragments/branches'
 
@@ -397,12 +396,18 @@ export async function myAgent(dataDir, storyId, opts): Promise<AgentStreamResult
       maxSteps: opts.maxSteps ?? 5,
     })
 
-    // 10. Stream
+    // 10. Prepare the stream. The abort signal is wired to explicit cancel
+    // only — a client disconnecting must never stop a generation.
+    const abortController = new AbortController()
     const result = await agent.stream({
       messages: userMessage ? [{ role: 'user', content: userMessage.content }] : [],
+      abortSignal: abortController.signal,
     })
 
-    return createEventStream(result.fullStream)
+    return {
+      cancel: () => abortController.abort(),
+      run: (onEvent) => consumeAgentStream(result.fullStream, onEvent),
+    }
   })
 }
 ```
@@ -415,7 +420,7 @@ export async function myAgent(dataDir, storyId, opts): Promise<AgentStreamResult
 | Model resolved early | `modelId` must be available when `compileAgentContext` calls `createDefaultBlocks`, which calls `instructionRegistry.resolve(key, modelId)` |
 | `excludeFragmentId` | Prevents the target fragment from appearing in context twice — the agent reads it via tools instead |
 | `compileAgentContext` | Handles the full block lifecycle: load block definition → `createDefaultBlocks()` → `applyBlockConfig()` (user overrides) → `compileBlocks()` → filter tools by `disabledTools` |
-| `createEventStream` | Converts the AI SDK's `fullStream` into an NDJSON `ReadableStream<string>` + a `completion` promise |
+| `consumeAgentStream` | Drives the AI SDK's `fullStream` to completion, pushing normalized events to a callback. A *push* contract on purpose: nothing a consumer does can stop the generation |
 
 ### Read-only vs write-enabled tools
 
@@ -423,16 +428,24 @@ Pass `{ readOnly: true }` to `createFragmentTools()` (or `readOnly: true` in the
 
 ### Return type
 
-All streaming agents return `AgentStreamResult`:
+All streaming agents return `AgentStreamResult` — a *prepared but not yet
+started* generation:
 
 ```ts
 interface AgentStreamResult {
-  eventStream: ReadableStream<string>   // NDJSON lines
-  completion: Promise<AgentStreamCompletion>
+  /** Drive the generation, pushing events to `onEvent`. Call exactly once. */
+  run(onEvent: (event: AgentStreamEvent) => void): Promise<AgentStreamCompletion>
+  /** Abort the underlying LLM call. Explicit user cancel only. */
+  cancel(): void
 }
 ```
 
-The `eventStream` emits events of type `AgentStreamEvent`:
+The caller — the run registry (see `docs/streaming-runs.md`) — decides when the
+generation runs and where its events go. Never hand a consumer something that
+can stop the producer: that was the cause of the lost-turn and truncated-prose
+bugs this contract replaced.
+
+`run` emits events of type `AgentStreamEvent`:
 
 ```ts
 type AgentStreamEvent =
@@ -540,7 +553,8 @@ const optimizeCharacterTool = tool({
   }),
   execute: async ({ fragmentId, instructions }) => {
     const result = await optimizeCharacter(dataDir, storyId, { fragmentId, instructions })
-    await result.completion
+    // Nested agent: drive it to completion, discarding its events.
+    await result.run(() => {})
     return { ok: true, fragmentId }
   },
 })
@@ -739,7 +753,8 @@ When adding a new agent:
 | `src/server/agents/agent-block-storage.ts` | Per-agent block config persistence |
 | `src/server/agents/compile-agent-context.ts` | `compileAgentContext()` — full block lifecycle |
 | `src/server/agents/create-agent.ts` | `createToolAgent()` — AI SDK `ToolLoopAgent` wrapper |
-| `src/server/agents/create-event-stream.ts` | `createEventStream()` — NDJSON stream builder |
+| `src/server/agents/create-event-stream.ts` | `consumeAgentStream()` — drives an agent stream, pushing normalized events |
+| `src/server/runs/` | Run registry, turn tracker, and HTTP glue (see `docs/streaming-runs.md`) |
 | `src/server/agents/create-streaming-runner.ts` | `createStreamingRunner()` — standard pipeline factory |
 | `src/server/agents/block-helpers.ts` | Composable block helpers and preview context utilities |
 | `src/server/agents/stream-types.ts` | `AgentStreamEvent`, `AgentStreamResult` types |

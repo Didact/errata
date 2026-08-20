@@ -9,7 +9,7 @@ import { ToolLoopAgent, stepCountIs, type ToolSet } from 'ai'
 import type { StoryMeta } from '../fragments/schema'
 import type { ContextBuildState } from '../llm/context-builder'
 import type { AgentBlockContext } from './agent-block-context'
-import type { AgentStreamResult } from './stream-types'
+import type { AgentStreamResult, AgentStreamCompletion } from './stream-types'
 import { getModel, buildProviderOptions } from '../llm/client'
 import { getStory } from '../fragments/storage'
 import { buildContextState } from '../llm/context-builder'
@@ -17,7 +17,7 @@ import { createFragmentTools } from '../llm/tools'
 import { reportUsage } from '../llm/token-tracker'
 import { normalizeTokenUsage } from '../llm/usage-normalizer'
 import { createLogger } from '../logging'
-import { createEventStream } from './create-event-stream'
+import { consumeAgentStream } from './create-event-stream'
 import { compileAgentContext, type CompiledAgentContext } from './compile-agent-context'
 import { withBranch } from '../fragments/branches'
 
@@ -94,10 +94,10 @@ export interface StreamingRunnerConfig<TOpts, TValidated = Record<string, unknow
   }) => Array<{ role: 'user' | 'assistant'; content: string }>
 
   /**
-   * Optional post-stream hook. Called with the stream result after creation.
-   * Use for logging, background cleanup, etc.
+   * Optional post-stream hook. Called once the generation has finished and its
+   * result is known. Use for logging, background cleanup, etc.
    */
-  afterStream?: (result: AgentStreamResult) => void
+  afterStream?: (completion: AgentStreamCompletion) => void
 }
 
 /**
@@ -196,29 +196,32 @@ export function createStreamingRunner<TOpts extends object, TValidated = Record<
         ? config.messages({ compiled, opts })
         : userMessage ? [{ role: 'user' as const, content: userMessage.content }] : []
 
-      // 11. Stream — abort the LLM call if the consumer disconnects.
+      // 11. Prepare the stream. The abort signal is wired to explicit cancel
+      // only — a client disconnecting must never stop the generation.
       const abortController = new AbortController()
       const result = await agent.stream({ messages, abortSignal: abortController.signal })
-      const streamResult = createEventStream(result.fullStream, () => abortController.abort())
 
-      // 12. Track token usage after stream completes
-      streamResult.completion.then(async () => {
-        try {
-          const rawUsage = await result.totalUsage
-          const usage = normalizeTokenUsage(rawUsage)
-          if (usage) {
-            reportUsage(dataDir, storyId, config.name, usage, modelId)
+      const streamResult: AgentStreamResult = {
+        cancel: () => abortController.abort(),
+        run: async (onEvent) => {
+          const completion = await consumeAgentStream(result.fullStream, onEvent)
+
+          // 12. Track token usage once the stream is drained.
+          try {
+            const rawUsage = await result.totalUsage
+            const usage = normalizeTokenUsage(rawUsage)
+            if (usage) {
+              reportUsage(dataDir, storyId, config.name, usage, modelId)
+            }
+          } catch {
+            // Some providers may not report usage
           }
-        } catch {
-          // Some providers may not report usage
-        }
-      }).catch(() => {
-        // Stream errored — skip usage tracking
-      })
 
-      // 13. Post-stream hook
-      if (config.afterStream) {
-        config.afterStream(streamResult)
+          // 13. Post-stream hook
+          config.afterStream?.(completion)
+
+          return completion
+        },
       }
 
       return streamResult
