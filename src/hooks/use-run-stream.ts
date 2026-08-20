@@ -35,6 +35,13 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
  */
 const STALL_TIMEOUT_MS = 15_000
 
+/**
+ * Silence beyond this means the link is dead, given the server keepalives every
+ * 5s. Used by the foreground/online handlers to rescue a stalled stream at once
+ * instead of waiting out {@link STALL_TIMEOUT_MS}.
+ */
+const STALE_AFTER_MS = 8_000
+
 class StreamStalled extends Error {
   constructor() {
     super('Stream stalled')
@@ -148,6 +155,10 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
   const disposedRef = useRef(false)
   /** Bumped on detach/unmount so an in-flight reader knows it is stale. */
   const epochRef = useRef(0)
+  /** When we last heard anything at all, keepalives included. */
+  const lastActivityRef = useRef(0)
+  /** The reader currently parked on the live stream, so a stale wake can free it. */
+  const currentReaderRef = useRef<ReadableStreamDefaultReader<SequencedChatEvent> | null>(null)
 
   const key = storageKey(storyId, kind, scopeId)
 
@@ -159,6 +170,11 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
   }, [])
 
   const settle = useCallback((status: RunStatus, message?: string) => {
+    // First terminal event wins. The server emits `error` (carrying the real
+    // provider message) immediately followed by `run-end` with status 'error';
+    // without this guard the generic run-end message would overwrite the
+    // specific one, and onSettled would fire twice.
+    if (settledRef.current) return
     settledRef.current = true
     connectedRef.current = false
     clearReconnectTimer()
@@ -175,7 +191,9 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
     epoch: number,
   ): Promise<boolean> => {
     const reader = stream.getReader()
+    currentReaderRef.current = reader
     connectedRef.current = true
+    lastActivityRef.current = Date.now()
     setIsReconnecting(false)
     let terminal = false
 
@@ -186,6 +204,12 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
         if (epoch !== epochRef.current) break
 
         const event = value as SequencedChatEvent
+        lastActivityRef.current = Date.now()
+
+        // Server padding: proves the link is alive while the model is quiet.
+        // Never dispatched, never advances the cursor.
+        if (event.type === 'keepalive') continue
+
         // Replay after a reconnect can overlap; seq makes dedupe exact.
         if (typeof event.seq === 'number') {
           if (event.seq < cursorRef.current) continue
@@ -211,6 +235,9 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
           } else if (event.type === 'run-end') {
             settle(event.status, event.status === 'error' ? 'Generation failed' : undefined)
           }
+          // The run is over; the server closes right behind this. Stop reading
+          // so the trailing run-end can't re-settle over the error message.
+          break
         }
       }
     } catch (err) {
@@ -224,6 +251,7 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
       }
     } finally {
       connectedRef.current = false
+      if (currentReaderRef.current === reader) currentReaderRef.current = null
       reader.cancel().catch(() => {})
     }
 
@@ -411,15 +439,32 @@ export function useRunStream(options: UseRunStreamOptions): UseRunStreamResult {
   // once. Without this the user waits out the backoff every time they switch
   // back to the app, which on a phone is constantly.
   useEffect(() => {
+    // A stalled stream still looks "connected" — consume() is parked inside
+    // readWithStallTimeout with connectedRef set — so bailing on connectedRef
+    // alone would skip the exact case this exists for: a phone returning to a
+    // stream that died while the tab was backgrounded. If we have not heard
+    // anything for longer than the server's keepalive interval, treat the link
+    // as dead and reattach now rather than waiting out the stall timeout.
+    const isStale = () =>
+      lastActivityRef.current > 0 && Date.now() - lastActivityRef.current > STALE_AFTER_MS
+
+    const reconnectIfNeeded = () => {
+      if (settledRef.current) return
+      if (connectedRef.current) {
+        // Cancelling the parked reader resolves its pending read, so consume()
+        // unwinds and the caller's normal "ended without a terminal event"
+        // path reconnects from the cursor.
+        if (isStale()) currentReaderRef.current?.cancel().catch(() => {})
+        return
+      }
+      scheduleReconnect(true)
+    }
+
     const wake = () => {
       if (document.visibilityState !== 'visible') return
-      if (settledRef.current || connectedRef.current) return
-      scheduleReconnect(true)
+      reconnectIfNeeded()
     }
-    const online = () => {
-      if (settledRef.current || connectedRef.current) return
-      scheduleReconnect(true)
-    }
+    const online = () => reconnectIfNeeded()
 
     document.addEventListener('visibilitychange', wake)
     window.addEventListener('online', online)

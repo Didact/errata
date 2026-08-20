@@ -22,6 +22,7 @@ import { createLogger } from '../logging'
 import { describeError } from '../error-message'
 import {
   BATCHABLE_EVENT_TYPES,
+  RUN_TIMEOUT_REASON,
   type RunKind,
   type RunStatus,
   type RunSummary,
@@ -328,7 +329,9 @@ export async function startRun(opts: StartRunOptions): Promise<Run> {
       limitMs: MAX_RUN_MS,
     })
     try {
-      run.abortController.abort()
+      // Tagged so the body can tell this from a user Stop and record the turn
+      // as a timeout rather than a cancellation.
+      run.abortController.abort(RUN_TIMEOUT_REASON)
     } catch {
       // Nothing useful to do; the finish below is what unblocks the client.
     }
@@ -347,11 +350,20 @@ export async function startRun(opts: StartRunOptions): Promise<Run> {
     branchId,
   ).then(
     () => {
-      finishRun(run, run.abortController.signal.aborted ? 'cancelled' : 'complete')
+      if (!run.abortController.signal.aborted) {
+        finishRun(run, 'complete')
+      } else if (run.abortController.signal.reason === RUN_TIMEOUT_REASON) {
+        // The watchdog already finished this run; the call is a no-op guard.
+        finishRun(run, 'error', 'Generation timed out.')
+      } else {
+        finishRun(run, 'cancelled')
+      }
     },
     (err) => {
       const message = describeError(err)
-      if (run.abortController.signal.aborted) {
+      if (run.abortController.signal.reason === RUN_TIMEOUT_REASON) {
+        finishRun(run, 'error', 'Generation timed out.')
+      } else if (run.abortController.signal.aborted) {
         logger.info('Run cancelled', { runId: run.id, kind: run.kind, storyId: run.storyId })
         finishRun(run, 'cancelled')
       } else {

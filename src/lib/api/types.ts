@@ -507,6 +507,12 @@ export type ChatEvent =
   | { type: 'run-start'; runId: string; kind: RunKind; status: RunStatus }
   | { type: 'run-end'; status: RunStatus }
   | { type: 'error'; error: string }
+  // Surfaced from the server's blank-line padding. Carries no content and no
+  // `seq`; it exists so a reader can tell "the connection is alive but the
+  // model is thinking" from "the connection is dead". Never dispatched to
+  // callers — a generation is routinely quiet for far longer than the stall
+  // timeout, so without this a slow model would look like a dropped link.
+  | { type: 'keepalive' }
 
 /** Every event delivered over the wire carries its position in the run's log. */
 export type SequencedChatEvent = ChatEvent & { seq: number }

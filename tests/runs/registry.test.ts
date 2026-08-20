@@ -10,6 +10,8 @@ import {
   cancelRun,
   subscribeRun,
   clearRuns,
+  abortedByTimeout,
+  abortedByUser,
 } from '@/server/runs'
 import type { SequencedRunEvent, ServerRunEvent } from '@/server/runs'
 import type { StoryMeta } from '@/server/fragments/schema'
@@ -558,6 +560,77 @@ describe('run registry', () => {
     expect(run.status).toBe('cancelled')
     // Settled on the body's own unwind, not the 5s grace timer.
     expect(Date.now() - t0).toBeLessThan(1000)
+  })
+
+  /**
+   * A watchdog timeout and an author pressing Stop both abort the same signal.
+   * Run bodies decide the persisted turn status from that signal, so without a
+   * reason they record a 10-minute timeout as a user cancellation — dropping
+   * the explanation entirely.
+   */
+  it('marks a watchdog abort as a timeout, distinguishable from a user Stop', async () => {
+    vi.useFakeTimers()
+    try {
+      let sawTimeout: boolean | null = null
+      let sawUser: boolean | null = null
+
+      const run = await startRun({
+        dataDir,
+        storyId: STORY_ID,
+        kind: 'librarian.chat',
+        scopeId: 'conv-timeout',
+        body: async ({ emit, signal }) => {
+          emit({ type: 'text', text: 'working' })
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => {
+              sawTimeout = abortedByTimeout(signal)
+              sawUser = abortedByUser(signal)
+              resolve()
+            }, { once: true })
+          })
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(11 * 60 * 1000)
+      await run.done
+
+      expect(sawTimeout).toBe(true)
+      expect(sawUser).toBe(false)
+      expect(run.status).toBe('error')
+      expect(run.error).toContain('exceeded')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports a user cancel as a user cancel, not a timeout', async () => {
+    let sawTimeout: boolean | null = null
+    let sawUser: boolean | null = null
+
+    const run = await startRun({
+      dataDir,
+      storyId: STORY_ID,
+      kind: 'librarian.chat',
+      scopeId: 'conv-usercancel',
+      body: async ({ emit, signal }) => {
+        emit({ type: 'text', text: 'working' })
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => {
+            sawTimeout = abortedByTimeout(signal)
+            sawUser = abortedByUser(signal)
+            resolve()
+          }, { once: true })
+        })
+      },
+    })
+
+    await new Promise(r => setTimeout(r, 20))
+    cancelRun(run.id)
+    await run.done
+
+    expect(sawTimeout).toBe(false)
+    expect(sawUser).toBe(true)
+    expect(run.status).toBe('cancelled')
   })
 
   it('returns null for an unknown run', () => {

@@ -95,6 +95,13 @@ export async function fetchGetEventStream(path: string): Promise<ReadableStream<
         if (newlineIdx !== -1) {
           const line = buffer.slice(0, newlineIdx).trim()
           buffer = buffer.slice(newlineIdx + 1)
+          if (!line) {
+            // Server keepalive padding. Forward it as a liveness marker rather
+            // than swallowing it, so a reader can distinguish a quiet
+            // generation from a dead connection.
+            controller.enqueue({ type: 'keepalive' } as SequencedChatEvent)
+            return
+          }
           if (line) {
             try {
               controller.enqueue(JSON.parse(line) as SequencedChatEvent)
@@ -159,6 +166,13 @@ export async function fetchEventStream(
         if (newlineIdx !== -1) {
           const line = buffer.slice(0, newlineIdx).trim()
           buffer = buffer.slice(newlineIdx + 1)
+          if (!line) {
+            // Server keepalive padding. Forward it as a liveness marker rather
+            // than swallowing it, so a reader can distinguish a quiet
+            // generation from a dead connection.
+            controller.enqueue({ type: 'keepalive' } as SequencedChatEvent)
+            return
+          }
           if (line) {
             try {
               controller.enqueue(JSON.parse(line) as SequencedChatEvent)

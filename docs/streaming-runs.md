@@ -98,8 +98,12 @@ tens of seconds without emitting — model latency on a large context, a slow to
 such a connection: carrier NAT, tunnels, corporate proxies. The client recovers
 by reattaching, but the author sees a needless "reconnecting" mid-answer.
 
-A blank line is valid NDJSON padding that both client parsers already skip, so
-it costs no protocol change and consumes no `seq`.
+A blank line is valid NDJSON padding, so it costs no protocol change and
+consumes no `seq`. The client parsers surface it as a `keepalive` event that is
+never dispatched to callers — it exists purely so a reader can tell "the link is
+alive but the model is thinking" from "the link is dead". Swallowing it would
+make a quiet generation indistinguishable from a stalled one, and the client's
+stall detector would fire on every slow model.
 
 Note this guards the *network* path, not the runtime: Nitro bundles srvx's Node
 adapter, and Node's http server imposes no idle timeout on a streaming response
@@ -169,6 +173,22 @@ Both dedupe by `seq` so replay after a reconnect can't double-apply anything.
   server returns every active run for the story and the client filters.
 - On a `409`, attaches to the run whose id the server returned rather than
   erroring — that's what the id is for.
+- Settles **once**: the server emits `error` (with the real message) immediately
+  followed by `run-end`, so the first terminal event wins and the generic
+  run-end message can't overwrite the specific one.
+- Detects a stall: reads race a 15s timeout (three missed keepalives), and
+  expiry is treated as a disconnect rather than a failure. A foreground/online
+  wake also frees a reader that has been silent past the keepalive interval,
+  rather than waiting the stall timeout out.
+
+## Cancellation vs timeout
+
+Both abort the same signal, so the run watchdog tags its abort with
+`RUN_TIMEOUT_REASON`. Run bodies use `abortedByUser(signal)` /
+`abortedByTimeout(signal)` to decide what to persist: an author's Stop records
+the turn as `cancelled` (their choice, no error), while a timeout records
+`error` with a reason. Without the tag a 10-minute timeout is stored as a
+cancellation and the explanation is lost.
 
 A `404` from the events endpoint means the run aged out of the registry, so both
 stop retrying and surface it rather than looping.

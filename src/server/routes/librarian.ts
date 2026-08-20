@@ -27,7 +27,7 @@ import { applyFragmentSuggestion } from '../librarian/suggestions'
 import { createLogger } from '../logging'
 import { describeError } from '../error-message'
 import { encodeStream } from './encode-stream'
-import { startRun, findLiveRun, type Run } from '../runs'
+import { startRun, findLiveRun, abortedByTimeout, abortedByUser, type Run } from '../runs'
 import { runStreamResponse, resolveExistingRun } from '../runs/http'
 import { startAgentRun } from '../runs/agent-run'
 import { createTurnTracker } from '../runs/turn-tracker'
@@ -216,7 +216,10 @@ async function startLibrarianChatRun(args: {
           content: result.text,
           ...(result.reasoning ? { reasoning: result.reasoning } : {}),
           ...deriveChatTurnFields(result, maxSteps),
-          status: signal.aborted ? 'cancelled' : saidNothing ? 'error' : 'complete',
+          status: abortedByTimeout(signal)
+            ? 'error'
+            : signal.aborted ? 'cancelled' : saidNothing ? 'error' : 'complete',
+          ...(abortedByTimeout(signal) ? { error: 'Generation timed out.' } : {}),
           ...(saidNothing ? { error: 'The model returned an empty response.' } : {}),
         })
 
@@ -241,8 +244,10 @@ async function startLibrarianChatRun(args: {
         // re-apply the same edits on the next turn.
         await tracker.flush()
         await updateChatMessageByRunId(dataDir, storyId, conversationId, runId, {
-          status: signal.aborted ? 'cancelled' : 'error',
-          ...(signal.aborted ? {} : { error: describeError(err) }),
+          status: abortedByUser(signal) ? 'cancelled' : 'error',
+          ...(abortedByUser(signal)
+            ? {}
+            : { error: abortedByTimeout(signal) ? 'Generation timed out.' : describeError(err) }),
         })
         throw err
       }

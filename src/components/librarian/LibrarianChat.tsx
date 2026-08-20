@@ -228,7 +228,13 @@ export function LibrarianChat({ storyId, conversationId, initialInput }: Librari
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if (!text || isStreaming) return
+    if (!text) return
+    if (isStreaming) {
+      // Keep what they typed and say why nothing happened — silently dropping
+      // the keypress reads as the app ignoring them.
+      setError('Wait for the current reply to finish before sending another.')
+      return
+    }
 
     setInput('')
     setError(null)

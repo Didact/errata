@@ -13,7 +13,7 @@ import {
 } from '../character-chat/storage'
 import { createLogger } from '../logging'
 import { describeError } from '../error-message'
-import { startRun, findLiveRun } from '../runs'
+import { startRun, findLiveRun, abortedByTimeout, abortedByUser } from '../runs'
 import { runStreamResponse, resolveExistingRun } from '../runs/http'
 import { createTurnTracker } from '../runs/turn-tracker'
 
@@ -193,7 +193,10 @@ export function characterChatRoutes(dataDir: string) {
               await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
                 content: result.text,
                 ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-                status: signal.aborted ? 'cancelled' : 'complete',
+                status: abortedByTimeout(signal)
+                  ? 'error'
+                  : signal.aborted ? 'cancelled' : 'complete',
+                ...(abortedByTimeout(signal) ? { error: 'Generation timed out.' } : {}),
               })
 
               requestLogger.info('Character chat completed', {
@@ -206,8 +209,10 @@ export function characterChatRoutes(dataDir: string) {
               // Keep whatever streamed through rather than dropping the turn.
               await tracker.flush()
               await updateCharacterMessageByRunId(dataDir, params.storyId, params.conversationId, runId, {
-                status: signal.aborted ? 'cancelled' : 'error',
-                ...(signal.aborted ? {} : { error: describeError(err) }),
+                status: abortedByUser(signal) ? 'cancelled' : 'error',
+                ...(abortedByUser(signal)
+                  ? {}
+                  : { error: abortedByTimeout(signal) ? 'Generation timed out.' : describeError(err) }),
               })
               throw err
             }

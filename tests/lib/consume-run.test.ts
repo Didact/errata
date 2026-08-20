@@ -213,6 +213,27 @@ describe('consumeRun', () => {
       .toBe('partial and the rest')
   })
 
+  it('treats keepalive padding as liveness, never as content', async () => {
+    // Blank server padding is surfaced as a keepalive marker so a reader can
+    // tell a quiet model from a dead link. It must not reach onEvent, and must
+    // not move the cursor — otherwise a reconnect would resume at the wrong seq.
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const seen: ChatEvent[] = []
+    const result = await consumeRun('story-1', streamOf([
+      seq(0, { type: 'run-start', runId: 'run-1', kind: 'generation', status: 'running' }),
+      { type: 'keepalive' } as SequencedChatEvent,
+      seq(1, { type: 'text', text: 'hello' }),
+      { type: 'keepalive' } as SequencedChatEvent,
+      seq(2, { type: 'run-end', status: 'complete' }),
+    ]), e => seen.push(e))
+
+    expect(result).toEqual({ runId: 'run-1', status: 'complete' })
+    expect(seen.map(e => e.type)).toEqual(['run-start', 'text', 'run-end'])
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('gives up when the stream dies before a run id is known', async () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)

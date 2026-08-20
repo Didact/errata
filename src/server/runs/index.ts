@@ -16,6 +16,9 @@ export {
 
 export {
   isTerminalStatus,
+  abortedByTimeout,
+  abortedByUser,
+  RUN_TIMEOUT_REASON,
   type RunKind,
   type RunStatus,
   type RunSummary,

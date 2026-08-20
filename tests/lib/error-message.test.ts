@@ -40,8 +40,15 @@ describe('describeError', () => {
       statusCode: 401,
       responseBody: '{"error":"invalid api key"}',
     })
-    // An Error with an empty message still has a usable name.
-    expect(describeError(apiErr)).toBe('AI_APICallError')
+    // A message-less Error still carries the provider's reply; returning just
+    // the name would throw away the only useful part.
+    const out = describeError(apiErr)
+    expect(out).toContain('invalid api key')
+    expect(out).toContain('401')
+  })
+
+  it('falls back to the name when a message-less Error carries nothing else', () => {
+    expect(describeError(Object.assign(new Error(''), { name: 'AbortError' }))).toBe('AbortError')
   })
 
   it('uses a plain Error message', () => {

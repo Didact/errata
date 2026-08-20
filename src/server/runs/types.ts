@@ -69,3 +69,21 @@ export interface RunSummary {
   /** Number of events emitted so far — a client attaching fresh reads from 0. */
   seq: number
 }
+
+/**
+ * Abort reason used when the watchdog stops a run, distinguishing it from an
+ * explicit user cancel (which aborts with no reason). A run body must tell the
+ * two apart: a Stop is the author's choice and records the turn as 'cancelled',
+ * whereas a timeout is a failure that needs to say so.
+ */
+export const RUN_TIMEOUT_REASON = 'errata:run-timeout'
+
+/** True when this signal was aborted by the run watchdog rather than by the author. */
+export function abortedByTimeout(signal: AbortSignal): boolean {
+  return signal.aborted && signal.reason === RUN_TIMEOUT_REASON
+}
+
+/** True when the author explicitly stopped the run. */
+export function abortedByUser(signal: AbortSignal): boolean {
+  return signal.aborted && signal.reason !== RUN_TIMEOUT_REASON
+}

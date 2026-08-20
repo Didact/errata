@@ -71,6 +71,8 @@ export async function consumeRun(
         if (done) return false
 
         const event = value
+        // Server padding: proves the link is alive while the model is quiet.
+        if (event.type === 'keepalive') continue
         if (typeof event.seq === 'number') {
           if (event.seq < cursor) continue
           cursor = event.seq + 1

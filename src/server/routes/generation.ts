@@ -39,7 +39,7 @@ import { registerActiveAgent, unregisterActiveAgent } from '../agents/active-reg
 import { reportUsage } from '../llm/token-tracker'
 import { normalizeTokenUsage } from '../llm/usage-normalizer'
 import { createLogger } from '../logging'
-import { startRun } from '../runs'
+import { startRun, abortedByUser } from '../runs'
 import { runStreamResponse } from '../runs/http'
 import type { Fragment } from '../fragments/schema'
 import type { SuggestDirectionsResult } from '../directions/suggest'
@@ -285,7 +285,9 @@ export function generationRoutes(dataDir: string) {
         // Stop (which aborts `signal`) does.
         body: async ({ runId, emit: emitEvent, signal }) => {
           const abortController = new AbortController()
-          signal.addEventListener('abort', () => abortController.abort(), { once: true })
+          // Forward the reason so the save path can tell an author Stop (keep the
+          // partial prose) from a watchdog timeout (a failure).
+          signal.addEventListener('abort', () => abortController.abort(signal.reason), { once: true })
           const emit = (event: Record<string, unknown>) => emitEvent(event as never)
           let totalUsagePromise: PromiseLike<unknown> | undefined
           try {
@@ -467,7 +469,7 @@ export function generationRoutes(dataDir: string) {
             // Emit a final finish event
             emit({ type: 'finish', finishReason: lastFinishReason, stepCount })
           } catch (err) {
-            wasAborted = abortController.signal.aborted
+            wasAborted = abortedByUser(abortController.signal)
             if (wasAborted) {
               // Explicit Stop only — a disconnected client can no longer reach
               // this path, so partial prose is saved because the author asked

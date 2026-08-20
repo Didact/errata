@@ -30,8 +30,10 @@ export function describeError(err: unknown, depth = 0): string {
   if (err instanceof Error) {
     const message = err.message.trim()
     if (message) return truncate(withStatus(message, err as unknown as Record<string, unknown>))
-    // An Error with no message still has a useful name (AbortError, TypeError…).
-    if (err.name) return err.name
+    // No message: fall through to the object handling below, which can still
+    // read a provider's `responseBody` off an APICallError. `err.name` is the
+    // last resort, applied at the end — returning it here would short-circuit
+    // that branch, since an Error is also an object.
   }
 
   if (err && typeof err === 'object') {
@@ -51,6 +53,11 @@ export function describeError(err: unknown, depth = 0): string {
     if (typeof o.responseBody === 'string' && o.responseBody.trim()) {
       return truncate(withStatus(o.responseBody.trim(), o))
     }
+
+    // An Error that got this far has no message and no provider body. Its name
+    // still says something (AbortError, TypeError…) and beats dumping whatever
+    // own enumerable properties it happens to carry.
+    if (err instanceof Error && err.name) return err.name
 
     try {
       const json = JSON.stringify(err)
