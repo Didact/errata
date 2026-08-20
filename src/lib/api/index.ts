@@ -23,6 +23,7 @@ export { folders } from './folders'
 export { sharing } from './sharing'
 export { erratanet } from './erratanet'
 export { runs } from './runs'
+export { presets } from './presets'
 
 // HTTP Client utilities (exported for advanced use cases)
 export { apiFetch, fetchStream, fetchEventStream, ApiError } from './client'
@@ -47,6 +48,7 @@ import { folders } from './folders'
 import { sharing } from './sharing'
 import { erratanet } from './erratanet'
 import { runs } from './runs'
+import { presets } from './presets'
 
 export const api = {
   stories,
@@ -68,4 +70,5 @@ export const api = {
   sharing,
   erratanet,
   runs,
+  presets,
 }

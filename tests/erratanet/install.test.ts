@@ -221,6 +221,30 @@ describe('installFragmentBundle', () => {
     })
   })
 
+  it('stamps meta.preset instead of meta.erratanet when provenance.kind is "preset"', async () => {
+    const presetProvenance: PackProvenance = {
+      pack: 'preset-abc123',
+      version: '0.0.0',
+      kind: 'preset',
+      presetName: 'Noir Detective Cast',
+    }
+    const created = await installFragmentBundle(dataDir, STORY_ID, makeBundle(), presetProvenance)
+
+    const alice = created.find((f) => f.name === 'Alice')!
+    expect(alice.meta.erratanet).toBeUndefined()
+    expect(alice.meta.preset).toMatchObject({
+      id: 'preset-abc123',
+      name: 'Noir Detective Cast',
+    })
+    expect(typeof (alice.meta.preset as Record<string, unknown>).appliedAt).toBe('string')
+
+    // Attachment-derived media fragments also carry preset provenance, not
+    // erratanet provenance a preset copy never came from the hub.
+    const media = created.find((f) => f.type === 'image')!
+    expect(media.meta.erratanet).toBeUndefined()
+    expect(media.meta.preset).toMatchObject({ id: 'preset-abc123', name: 'Noir Detective Cast' })
+  })
+
   it('preserves sticky / placement / order from the bundle entry', async () => {
     const created = await installFragmentBundle(dataDir, STORY_ID, makeBundle(), PROVENANCE)
 

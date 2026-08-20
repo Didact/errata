@@ -21,6 +21,7 @@ import { sharingRoutes } from './routes/sharing'
 import { erratanetRoutes } from './routes/erratanet'
 import { erratanetAgentConfigRoutes } from './routes/erratanet-agent-config'
 import { runRoutes } from './routes/runs'
+import { presetRoutes } from './routes/presets'
 
 const DATA_DIR = process.env.DATA_DIR ?? './data'
 
@@ -67,6 +68,7 @@ export function createApp(dataDir: string = DATA_DIR) {
           { name: 'Folders', description: 'Fragment folder organization' },
           { name: 'Plugins', description: 'Plugin listing and UI asset serving' },
           { name: 'Runs', description: 'Server-authoritative LLM runs: listing, cursor replay, and cancellation' },
+          { name: 'Presets', description: 'Named, reusable bundles of non-prose fragments used to seed new stories' },
         ],
       },
     }))
@@ -139,6 +141,7 @@ export function createApp(dataDir: string = DATA_DIR) {
     .use(erratanetRoutes(dataDir))
     .use(erratanetAgentConfigRoutes(dataDir))
     .use(runRoutes())
+    .use(presetRoutes(dataDir))
 
   // Mount plugin routes
   for (const plugin of pluginRegistry.listAll()) {

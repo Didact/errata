@@ -90,6 +90,14 @@ Use helpers from `src/lib/dom-ids.ts`:
 - `overlay-provider-panel`
 - `overlay-fragment-editor-<mode>`
 
+### Story presets
+
+- `fragment-export-save-preset` (the export panel's "Save as preset" button)
+- `save-preset-dialog`, `save-preset-name`, `save-preset-description`, `save-preset-cancel`, `save-preset-submit`
+- `preset-manager-import`
+- `preset-row-<presetId>`, `preset-rename-input-<presetId>`
+- `story-create-preset-blank`, `story-create-preset-<presetId>` (the New Story dialog's "Start from" picker)
+
 ## Adding new IDs
 
 When adding or changing UI:

@@ -38,6 +38,7 @@ import { ProviderList, ProviderPanel } from '@/components/settings/ProviderManag
 import { AboutSection } from '@/components/settings/AboutPanel'
 import { DesktopUpdatesControls } from '@/components/settings/DesktopUpdatesPanel'
 import { SectionHeading } from '@/components/settings/primitives'
+import { PresetManager } from '@/components/presets/PresetManager'
 
 const THEME_OPTIONS = [
   { value: 'light' as const, label: 'Light', Icon: Sun },
@@ -63,6 +64,7 @@ function StoryListPage() {
 
   // Options section state
   const [showOptions, setShowOptions] = useState(false)
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
   const [autoApplyLibrarian, setAutoApplyLibrarian] = useState(false)
   const [parsed, setParsed] = useState<ErrataExportData | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
@@ -73,6 +75,12 @@ function StoryListPage() {
     queryKey: ['stories'],
     queryFn: api.stories.list,
   })
+
+  const { data: presetsData } = useQuery({
+    queryKey: ['presets'],
+    queryFn: api.presets.list,
+  })
+  const availablePresets = presetsData?.presets ?? []
 
   const sortedStories = useMemo(() => {
     if (!stories) return []
@@ -113,6 +121,8 @@ function StoryListPage() {
     if (result) {
       setParsed(result)
       setParseError(null)
+      // A preset and a one-off bundle import both add fragments; keep them mutually exclusive.
+      setSelectedPresetId(null)
       if (result._errata === 'fragment-bundle') {
         setSelectedIndices(new Set(result.fragments.map((_, i) => i)))
       }
@@ -179,6 +189,7 @@ function StoryListPage() {
     setDescription('')
     setCoverImage(null)
     setShowOptions(false)
+    setSelectedPresetId(null)
     setAutoApplyLibrarian(false)
     setParsed(null)
     setParseError(null)
@@ -196,8 +207,11 @@ function StoryListPage() {
         await api.settings.update(newStory.id, { autoApplyLibrarianSuggestions: true })
       }
 
-      // 3. Import fragments if any are selected
-      if (parsed) {
+      // 3. Seed from a preset, or import a one-off bundle. Mutually exclusive
+      // in the UI (picking one clears the other), so at most one runs.
+      if (selectedPresetId) {
+        await api.presets.apply(selectedPresetId, newStory.id)
+      } else if (parsed) {
         const entries: FragmentExportEntry[] = parsed._errata === 'fragment'
           ? [{ ...(parsed as FragmentClipboardData).fragment, attachments: (parsed as FragmentClipboardData).attachments }]
           : (parsed as FragmentBundleData).fragments.filter((_, i) => selectedIndices.has(i))
@@ -467,6 +481,45 @@ function StoryListPage() {
                   />
                 </div>
 
+                {/* Start from a preset */}
+                {availablePresets.length > 0 && (
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1.5 block uppercase tracking-wider">Start from</label>
+                    <div className="rounded-lg border border-border/40 divide-y divide-border/20 overflow-hidden max-h-40 overflow-y-auto">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPresetId(null)}
+                        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
+                          selectedPresetId === null ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent/40'
+                        }`}
+                        data-component-id="story-create-preset-blank"
+                      >
+                        Blank story
+                      </button>
+                      {availablePresets.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedPresetId(preset.id)
+                            // A preset and a one-off bundle import both add fragments; keep them mutually exclusive.
+                            setParsed(null)
+                            setParseError(null)
+                            setSelectedIndices(new Set())
+                          }}
+                          className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors ${
+                            selectedPresetId === preset.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-accent/40'
+                          }`}
+                          data-component-id={`story-create-preset-${preset.id}`}
+                        >
+                          <span className="truncate">{preset.name}</span>
+                          <span className="text-[0.625rem] text-muted-foreground shrink-0">{preset.fragmentCount} fragment{preset.fragmentCount !== 1 ? 's' : ''}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Cover Image Upload */}
                 <div>
                   <label className="text-xs font-medium text-muted-foreground mb-1.5 block uppercase tracking-wider">Cover Image</label>
@@ -519,7 +572,13 @@ function StoryListPage() {
                           Import Fragments
                         </label>
 
-                        {!parsed && (
+                        {selectedPresetId && (
+                          <p className="text-[0.6875rem] text-muted-foreground italic">
+                            A preset is already selected above. Clear it to import a fragment bundle instead.
+                          </p>
+                        )}
+
+                        {!selectedPresetId && !parsed && (
                           <>
                             <div className="flex gap-1.5">
                               <Button
@@ -570,18 +629,18 @@ function StoryListPage() {
                           </>
                         )}
 
-                        {parseError && (
+                        {!selectedPresetId && parseError && (
                           <div className="flex items-start gap-2 text-xs text-destructive/80 bg-destructive/5 rounded-md px-3 py-2">
                             <AlertCircle className="size-3.5 mt-0.5 shrink-0" />
                             <span>{parseError}</span>
                           </div>
                         )}
 
-                        {parsed && isSingleFragment(parsed) && (
+                        {!selectedPresetId && parsed && isSingleFragment(parsed) && (
                           <SingleFragmentPreview data={parsed as FragmentClipboardData} onClear={() => { setParsed(null); setParseError(null) }} />
                         )}
 
-                        {parsed && isBundle(parsed) && (
+                        {!selectedPresetId && parsed && isBundle(parsed) && (
                           <BundlePreview
                             data={parsed as FragmentBundleData}
                             selectedIndices={selectedIndices}
@@ -717,6 +776,13 @@ function StoryListPage() {
               <SectionHeading label="LLM providers" />
               <div className="mt-2">
                 <ProviderList onManage={() => { setShowSettings(false); setShowProviders(true) }} />
+              </div>
+            </section>
+
+            <section>
+              <SectionHeading label="Story presets" />
+              <div className="mt-2">
+                <PresetManager />
               </div>
             </section>
 

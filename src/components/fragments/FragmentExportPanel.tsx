@@ -4,6 +4,7 @@ import { api, type Fragment } from '@/lib/api'
 import { resolveFragmentVisual, generateBubbles, hexagonPoints, diamondPoints, type Bubble } from '@/lib/fragment-visuals'
 import { serializeFragment, serializeBundle, downloadExportFile } from '@/lib/fragment-clipboard'
 import { PublishPackDialog } from '@/components/erratanet/PublishPackDialog'
+import { SavePresetDialog } from '@/components/presets/SavePresetDialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +29,7 @@ import {
   Package,
   Settings2,
   UploadCloud,
+  BookmarkPlus,
 } from 'lucide-react'
 
 interface FragmentExportPanelProps {
@@ -65,6 +67,7 @@ export function FragmentExportPanel({ storyId, storyName, onClose }: FragmentExp
   const [copied, setCopied] = useState(false)
   const [includeConfigs, setIncludeConfigs] = useState(false)
   const [publishMode, setPublishMode] = useState<null | 'fragments' | 'story'>(null)
+  const [showSavePreset, setShowSavePreset] = useState(false)
 
   const { data: allFragments } = useQuery({
     queryKey: ['fragments', storyId],
@@ -398,6 +401,17 @@ export function FragmentExportPanel({ storyId, storyName, onClose }: FragmentExp
           size="sm"
           variant="outline"
           className="gap-1.5"
+          disabled={selected.size === 0}
+          onClick={() => setShowSavePreset(true)}
+          data-component-id="fragment-export-save-preset"
+        >
+          <BookmarkPlus className="size-3.5" />
+          Save as preset
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5"
           onClick={() => setPublishMode('story')}
         >
           <UploadCloud className="size-3.5" />
@@ -413,6 +427,14 @@ export function FragmentExportPanel({ storyId, storyName, onClose }: FragmentExp
         onOpenChange={(o) => { if (!o) setPublishMode(null) }}
         mode={publishMode ?? 'fragments'}
         storyId={storyId}
+        selectedFragments={selectedFragments}
+        mediaById={mediaById}
+        storyName={storyName}
+      />
+
+      <SavePresetDialog
+        open={showSavePreset}
+        onOpenChange={setShowSavePreset}
         selectedFragments={selectedFragments}
         mediaById={mediaById}
         storyName={storyName}

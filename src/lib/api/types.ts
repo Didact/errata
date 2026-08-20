@@ -777,3 +777,18 @@ export interface AgentPresetDetailResponse {
   requiresConsent: boolean
   error?: string
 }
+
+// --- Story presets ---
+
+/** A named, saved bundle of non-prose fragments used to seed a new story. */
+export interface StoryPresetMeta {
+  id: string
+  name: string
+  description: string
+  /** Name of the story this was saved from, for display only. */
+  sourceStoryName?: string
+  fragmentCount: number
+  countsByType: Record<string, number>
+  createdAt: string
+  updatedAt: string
+}

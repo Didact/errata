@@ -2,6 +2,8 @@
 
 - `docs/fragments-and-prose-chain.md`
   - Fragment system and prose chain: complete schema reference, fragment types, ID conventions, prose chain structure, filesystem storage layout, full API reference, import/export format, SillyTavern character card import (PNG + JSON with lorebook/world book support), and porting guide.
+- `docs/story-presets.md`
+  - Story presets: named, reusable bundles of non-prose fragments used to seed new stories. Storage layout, the ref-aware "copied, not shared" apply contract, API routes, and UI surfaces.
 - `docs/context-blocks.md`
   - Context block system: structured LLM prompt blocks, the `beforeBlocks` plugin hook, Block Editor UI, custom blocks (simple + script), and block configuration API.
 - `docs/summarization-and-memory.md`

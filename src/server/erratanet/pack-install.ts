@@ -30,10 +30,20 @@ import type { Fragment, StoryMeta } from '../fragments/schema'
  */
 
 export interface PackProvenance {
-  /** Global pack id, e.g. `@handle/slug`. */
+  /** Global pack id, e.g. `@handle/slug`. Ignored when `kind` is `'preset'`. */
   pack: string
-  /** Pack version (semver). */
+  /** Pack version (semver). Ignored when `kind` is `'preset'`. */
   version: string
+  /**
+   * What kind of source this install is copying from. Defaults to
+   * `'erratanet'` so every existing caller (hub installs) is unaffected.
+   * `'preset'` installs are local content, not hub content: they stamp
+   * `meta.preset` instead of `meta.erratanet`, so they never masquerade as a
+   * hub pack the update-check logic would try to track.
+   */
+  kind?: 'erratanet' | 'preset'
+  /** Preset name, used only when `kind` is `'preset'`. */
+  presetName?: string
 }
 
 export type UnwrappedPack =
@@ -247,6 +257,26 @@ interface VisualRef {
   boundary?: { x: number; y: number; width: number; height: number }
 }
 
+/** Build the `meta.erratanet` or `meta.preset` provenance stamp for a fragment. */
+function provenanceMeta(provenance: PackProvenance, sourceLocalId: string | undefined): Record<string, unknown> {
+  if (provenance.kind === 'preset') {
+    return {
+      preset: {
+        id: provenance.pack,
+        name: provenance.presetName ?? provenance.pack,
+        appliedAt: new Date().toISOString(),
+      },
+    }
+  }
+  return {
+    erratanet: {
+      pack: provenance.pack,
+      version: provenance.version,
+      ...(sourceLocalId ? { sourceLocalId } : {}),
+    },
+  }
+}
+
 /**
  * Ref-aware batch importer for a fragment bundle. Unlike the per-entry client
  * importer, this pre-allocates every fragment id up front so that cross-fragment
@@ -366,11 +396,7 @@ export async function installFragmentBundle(
     // (d) Stamp provenance.
     const meta: Record<string, unknown> = {
       ...remapped.meta,
-      erratanet: {
-        pack: provenance.pack,
-        version: provenance.version,
-        sourceLocalId: entry.id,
-      },
+      ...provenanceMeta(provenance, entry.id),
     }
 
     // (e) Create with the pre-assigned id and original placement/sticky/order.
@@ -414,13 +440,7 @@ function buildFragment(args: BuildFragmentArgs): Fragment {
     createdAt: args.now,
     updatedAt: args.now,
     order: 0,
-    meta: {
-      erratanet: {
-        pack: args.provenance.pack,
-        version: args.provenance.version,
-        ...(args.sourceLocalId ? { sourceLocalId: args.sourceLocalId } : {}),
-      },
-    },
+    meta: provenanceMeta(args.provenance, args.sourceLocalId),
     archived: false,
     version: 1,
     versions: [],
