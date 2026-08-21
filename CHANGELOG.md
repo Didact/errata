@@ -3,6 +3,36 @@
 All notable changes to Errata are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are git tags.
 
+## [1.12.0] — 2026-08-21
+
+### Added
+- **Story presets.** Save a named, reusable bundle of characters, guidelines,
+  and knowledge from any story, then seed a brand-new story from it in one
+  click. Presets are managed from the global Settings dialog and applied via
+  a "Start from" picker in the New Story dialog. Fragments are copied, never
+  shared: applying a preset installs fresh fragments through the existing
+  ref-aware bundle importer, so editing a copy never touches the preset (or
+  the story it came from). See `docs/story-presets.md`.
+
+## [1.11.0] — 2026-08-19
+
+### Added
+- **Server-authoritative generations.** Every LLM run (prose generation,
+  librarian chat, character chat, refine, prose-transform) now lives on the
+  server as a tracked run instead of the browser tab that started it. Closing
+  the tab, backgrounding it on a phone, or losing signal no longer truncates
+  or loses output: the client reattaches to the in-progress run from a
+  sequence cursor and replays exactly what it missed, with idempotent
+  handling so nothing is applied twice. Chat turns persist their streaming
+  state (`streaming` / `complete` / `error` / `cancelled`) so an interrupted
+  turn survives a reload instead of vanishing. See `docs/streaming-runs.md`.
+
+### Fixed
+- Librarian chat no longer returns an empty reply after making tool calls,
+  and an empty turn can no longer poison the conversation history.
+- NDJSON keepalive padding keeps idle run streams warm so a slow model isn't
+  mistaken for a dropped connection.
+
 ## [1.10.2] — 2026-06-28
 
 ### Fixed
